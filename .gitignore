@@ -1,0 +1,16 @@
+# Runtime log written next to blinds_controller.py
+blinds_controller.log
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+env/
+*.egg-info/
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

@@ -1,0 +1,18 @@
+# Blinds Controller — Python dependencies
+#
+# The app RUNS WITHOUT ANY of these (Art-Net output uses only the standard
+# library + tkinter). They unlock the optional features noted below.
+#
+# Install all with:   pip install -r requirements.txt
+
+# Audio BPM detection (microphone / line-in / loopback) ----------------------
+numpy
+sounddevice
+aubio                       # beat/tempo analysis; falls back to a numpy onset detector if missing
+
+# Ableton Link sync (Traktor, Ableton Live, etc.) ----------------------------
+aalink
+
+# Windows-only: capture system audio (WASAPI loopback) so you can analyse the
+# music playing on the PC without a physical input. Ignored on Linux/macOS.
+pyaudiowpatch ; sys_platform == "win32"
