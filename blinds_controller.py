@@ -675,6 +675,7 @@ class BlindsApp(tk.Tk):
         self._bpm_var    = tk.DoubleVar(value=120.0)
         self._gap_pos_var  = tk.DoubleVar(value=50.0)  # 0=bottom, 100=top (%)
         self._gap_size_var = tk.DoubleVar(value=5.0)   # max gap size (% of window)
+        self._overlap_var  = tk.DoubleVar(value=0.0)   # closed overlap % (10 → 55% each)
         self._size_sync_beats: "float | None" = None   # None = static
         self._pos_sync_beats:  "float | None" = None
         self._size_sync_btns: list = []
@@ -960,8 +961,28 @@ class BlindsApp(tk.Tk):
             sync_attr="_size_sync_btns", set_sync_fn=self._set_size_sync,
             pat_attr="_size_pbts",       set_pat_fn=self._set_size_pattern)
 
+        # Closed-overlap fine-tune + a full-open park button
+        ov = tk.Frame(self, bg=BG)
+        ov.pack(padx=20, pady=(2, 4), fill="x")
+        tk.Label(ov, text="Overlap:", font=("Segoe UI", 9),
+                 bg=BG, fg=FG, width=8, anchor="w").pack(side="left")
+        ttk.Scale(ov, from_=0, to=30, orient="horizontal",
+                  variable=self._overlap_var, length=170).pack(side="left", padx=4)
+        ov_lbl = tk.Label(ov, text="  0%", font=("Segoe UI", 9, "bold"),
+                          bg=BG, fg=GREEN, width=6)
+        ov_lbl.pack(side="left", padx=(0, 6))
+        self._overlap_var.trace_add("write",
+            lambda *_: ov_lbl.config(text=f"{int(round(self._overlap_var.get()))}%"))
+        tk.Label(ov, text="(blinds overlap when closed — light-tight)",
+                 font=("Segoe UI", 8), bg=BG, fg=DIM).pack(side="left")
+        open_btn = tk.Button(ov, text="⤢ Open 100%", font=("Segoe UI", 8),
+                             bg=BTN, fg=BLUE, relief="flat", padx=8, pady=3,
+                             cursor="hand2", command=self._open_full)
+        open_btn.pack(side="right")
+        _hov(open_btn)
+
         # Manual-mode traces: push static values to all frames when sliders move
-        for v in (self._gap_pos_var, self._gap_size_var):
+        for v in (self._gap_pos_var, self._gap_size_var, self._overlap_var):
             v.trace_add("write", lambda *_: (
                 None if self._bpm_on.get() else self._push_from_gap_controls()))
 
@@ -1138,12 +1159,24 @@ class BlindsApp(tk.Tk):
 
     def _push_from_gap_controls(self):
         """Push current Gap Position + Gap Size to all frame sliders."""
-        pos  = max(0.0, min(1.0, self._gap_pos_var.get()  / 100.0))
-        size = max(0.0, min(1.0, self._gap_size_var.get() / 100.0))
+        pos     = max(0.0, min(1.0, self._gap_pos_var.get()  / 100.0))
+        size    = max(0.0, min(1.0, self._gap_size_var.get() / 100.0))
+        overlap = self._overlap_var.get() / 100.0
+        cover   = (1.0 + overlap) * (1.0 - size)   # >1 when closed → blinds overlap
         self._suspend_send = True
         for pv in self._pvars:
-            pv["t"].set((1.0 - pos) * (1.0 - size) * 100.0)
-            pv["b"].set(pos * (1.0 - size) * 100.0)
+            pv["t"].set(max(0.0, min(100.0, (1.0 - pos) * cover * 100.0)))
+            pv["b"].set(max(0.0, min(100.0, pos * cover * 100.0)))
+        self._suspend_send = False
+        self._send_frame()
+
+    def _open_full(self):
+        """Park all blinds fully open (both retracted to 0 %). Manual use; a
+        running BPM animation will override on the next tick."""
+        self._suspend_send = True
+        for pv in self._pvars:
+            pv["b"].set(0.0)
+            pv["t"].set(0.0)
         self._suspend_send = False
         self._send_frame()
 
@@ -1475,6 +1508,7 @@ class BlindsApp(tk.Tk):
 
         max_size   = self._gap_size_var.get() / 100.0   # 0..1
         static_pos = self._gap_pos_var.get()  / 100.0   # 0..1  (0=bottom, 1=top)
+        overlap    = self._overlap_var.get()  / 100.0   # closed overlap (10% → 55% each)
         size_beats = self._size_sync_beats               # None or float
         pos_beats  = self._pos_sync_beats                # None or float
         n = len(FRAMES)
@@ -1500,10 +1534,12 @@ class BlindsApp(tk.Tk):
             size = max(0.0, min(1.0, size))
             pos  = max(0.0, min(1.0, pos))
 
+            # Overlap scales coverage past 100% when closed (light-tight).
+            cover = (1.0 + overlap) * (1.0 - size)
             # pos=0 → top blind fully extended (gap at bottom)
             # pos=1 → bottom blind fully extended (gap at top)
-            t_pct = (1.0 - pos) * (1.0 - size) * 100.0
-            b_pct = pos * (1.0 - size) * 100.0
+            t_pct = max(0.0, min(100.0, (1.0 - pos) * cover * 100.0))
+            b_pct = max(0.0, min(100.0, pos * cover * 100.0))
             positions.append((b_pct, t_pct))
 
         self.after(0, lambda p=positions: self._apply_positions(p))
