@@ -132,6 +132,7 @@ except ImportError:
 
 ARTNET_PORT = 6454
 UNIVERSE    = 1        # Must match firmware:  universe1 = 1
+OSC_PORT    = 7000     # firmware OSC listen port (calibration + status)
 
 # All four windows live in ONE universe, laid out as 4-channel fixtures so a
 # lighting console (MagicQ etc.) can patch them and a single broadcast packet
@@ -183,6 +184,59 @@ def send_universe(targets, positions):
             _sock.sendto(pkt, (ip, ARTNET_PORT))
         except OSError:
             pass
+
+# ── OSC (calibration triggers + status telemetry) ────────────────────────────
+#
+# Minimal hand-rolled OSC so no extra dependency is needed.
+# We send:    /calibrate, /btm/calibrate, /top/calibrate, /status   (no args)
+# We receive: /status  with 8 ints:
+#   [cal0, homed0, max0, pos0, cal1, homed1, max1, pos1]
+# and map each reply to a window by the packet's source IP.
+
+def _osc_string(s: str) -> bytes:
+    b = s.encode("ascii") + b"\x00"
+    return b + b"\x00" * ((4 - len(b) % 4) % 4)
+
+def _osc_message(addr: str, *int_args: int) -> bytes:
+    msg = _osc_string(addr) + _osc_string("," + "i" * len(int_args))
+    for a in int_args:
+        msg += struct.pack(">i", int(a))
+    return msg
+
+def _osc_read_string(data: bytes, pos: int):
+    end = data.index(b"\x00", pos)
+    s = data[pos:end].decode("ascii", "replace")
+    field = (end - pos) + 1
+    field += (4 - field % 4) % 4
+    return s, pos + field
+
+def _osc_parse(data: bytes):
+    """Return (address, [args]). Supports int and float args."""
+    addr, pos = _osc_read_string(data, 0)
+    if pos >= len(data):
+        return addr, []
+    tags, pos = _osc_read_string(data, pos)
+    args = []
+    for t in tags[1:]:
+        if t == "i":
+            args.append(struct.unpack_from(">i", data, pos)[0]); pos += 4
+        elif t == "f":
+            args.append(struct.unpack_from(">f", data, pos)[0]); pos += 4
+        elif t == "s":
+            _, pos = _osc_read_string(data, pos)
+    return addr, args
+
+# Dedicated socket: polls go out from it, ESP replies come back to it (the
+# firmware replies to remoteIP:remotePort, i.e. this socket's address).
+_osc_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+_osc_sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+_osc_sock.settimeout(0.25)
+
+def osc_send(ip: str, addr: str, *int_args: int):
+    try:
+        _osc_sock.sendto(_osc_message(addr, *int_args), (ip, OSC_PORT))
+    except OSError:
+        pass
 
 # ── Beat Clock (used when Ableton Link is absent) ────────────────────────────
 
@@ -270,6 +324,14 @@ class AudioBPMDetector:
     _HOP  = 512
     _RATE = 44100
 
+    # ── Tier-1 stability wrapper tunables ────────────────────────────────────
+    _MAX_BEATS    = 64      # beat-timestamp ring buffer length (~30 s @ 120 BPM)
+    _MIN_BEATS    = 6       # min beats before a computed BPM is trusted
+    _BPM_FOLD_LO  = 85.0    # octave-fold window [lo, 2*lo) — house/techno range
+    _GATE_FREEZE  = 0.10    # enter HOLD when RMS < this * recent peak
+    _GATE_RESUME  = 0.20    # candidate-resume when RMS > this * recent peak
+    _RESUME_BEATS = 4       # consecutive fresh beats required to leave HOLD
+
     def __init__(self):
         self._stream      = None
         self._paw_inst    = None   # PyAudio instance for loopback streams
@@ -283,7 +345,13 @@ class AudioBPMDetector:
         self.level        = 0.0    # RMS — read by UI level meter
         self._lp_y        = 0.0    # IIR low-pass state (bass pre-filter)
         self._lp_alpha    = 0.03   # updated per stream in _init_aubio
-        self._bpm_buf     = []     # ring buffer for BPM median smoothing
+        # Tier-1 stability state
+        self._beat_times  = []     # perf_counter timestamps of detected beats
+        self._locked_bpm  = 0.0    # last confident BPM (held through breaks)
+        self._lock_conf   = 0.0    # confidence from inter-beat-interval consistency
+        self._frozen      = False  # HOLD state during beatless sections
+        self._fresh       = 0      # fresh confident beats since audio returned
+        self._rms_peak    = 1e-6   # adaptive loudness reference for the gate
 
     # ── public ────────────────────────────────────────────────────────────────
 
@@ -394,8 +462,14 @@ class AudioBPMDetector:
         self._ticks    = 0
         self._onsets   = []
         self._e_prev   = 0.0
-        self._bpm_buf  = []
         self._lp_y     = 0.0
+        # reset stability state
+        self._beat_times = []
+        self._locked_bpm = 0.0
+        self._lock_conf  = 0.0
+        self._frozen     = False
+        self._fresh      = 0
+        self._rms_peak   = 1e-6
 
     def _bass_filter(self, samples):
         """First-order IIR low-pass — keeps kick/snare range, cuts hi-hats/voice."""
@@ -425,19 +499,94 @@ class AudioBPMDetector:
         self._process(mono)
 
     def _aubio_tick(self, mono):
-        beat = self._tempo_obj(mono)
-        bpm  = float(self._tempo_obj.get_bpm())
-        conf = float(self._tempo_obj.get_confidence())
-        if bpm > 30:
-            self._bpm_buf.append(bpm)
-            if len(self._bpm_buf) > 8:
-                self._bpm_buf.pop(0)
-            # Median of recent readings smooths jitter without adding much lag
-            bpm = float(np.median(self._bpm_buf))
-        # Fire on beat events AND poll every ~1 s so the display never stalls.
-        if (beat[0] or self._ticks % 86 == 0) and bpm > 30:
-            if self._cb:
-                self._cb(bpm, conf)
+        # Advance aubio every hop (keeps its internal tracking state moving).
+        beat    = self._tempo_obj(mono)
+        is_beat = bool(beat[0])
+        now     = time.perf_counter()
+        rms     = self.level   # full-band RMS, set in _process before this call
+
+        # ── Adaptive loudness gate (hysteresis) ──────────────────────────────
+        # Peak tracks recent loudness while active; held fixed during a break so
+        # a multi-minute quiet section keeps the gate referenced to the music.
+        if not self._frozen:
+            self._rms_peak = max(rms, self._rms_peak * 0.9995)
+        else:
+            self._rms_peak = max(rms, self._rms_peak)
+        peak  = max(self._rms_peak, 1e-6)
+        quiet = rms < self._GATE_FREEZE * peak
+        loud  = rms > self._GATE_RESUME * peak
+
+        if not self._frozen and quiet:
+            # Enter HOLD: keep the last locked BPM, drop stale beats so the gap
+            # across the break can't corrupt the next interval estimate.
+            self._frozen = True
+            self._beat_times = []
+            self._fresh = 0
+
+        if is_beat:
+            if self._frozen:
+                if loud:
+                    # Collect fresh evidence; only leave HOLD after enough beats
+                    # (a single stray beat after silence won't unfreeze us).
+                    self._beat_times.append(now)
+                    self._fresh += 1
+                    if self._fresh >= self._RESUME_BEATS:
+                        self._frozen = False
+            else:
+                self._beat_times.append(now)
+            if len(self._beat_times) > self._MAX_BEATS:
+                self._beat_times.pop(0)
+            if not self._frozen:
+                bpm, conf = self._recompute()
+                if bpm is not None:
+                    self._locked_bpm = bpm
+                    self._lock_conf  = conf
+
+        # Report on beats AND ~2x/sec so the display + clock never stall.
+        if (is_beat or self._ticks % 43 == 0) and self._cb and self._locked_bpm > 0:
+            status = "hold" if self._frozen else "tracking"
+            self._cb(self._locked_bpm, self._lock_conf, status)
+
+    def _octave_fold(self, bpm: float, ref: float = 0.0) -> float:
+        """Fold octave (half/double) errors. With a reference (the locked BPM),
+        pick the multiple closest to it; otherwise fold into [LO, 2*LO)."""
+        if bpm <= 0:
+            return bpm
+        if ref > 0:
+            best = bpm
+            for m in (0.25, 0.5, 1.0, 2.0, 4.0):
+                if abs(bpm * m - ref) < abs(best - ref):
+                    best = bpm * m
+            return best
+        lo = self._BPM_FOLD_LO
+        while bpm < lo:
+            bpm *= 2.0
+        while bpm >= lo * 2.0:
+            bpm /= 2.0
+        return bpm
+
+    def _recompute(self):
+        """Stable BPM from the beat-time ring buffer: median picks the dominant
+        interval cluster, mean of the inliers gives sub-decimal precision, and
+        interval consistency yields a meaningful confidence. (None, 0.0) if not
+        enough data yet."""
+        if len(self._beat_times) < self._MIN_BEATS:
+            return None, 0.0
+        ibis = np.diff(np.array(self._beat_times))
+        ibis = ibis[(ibis > 0.25) & (ibis < 2.0)]      # 30–240 BPM plausible
+        if len(ibis) < self._MIN_BEATS - 1:
+            return None, 0.0
+        med = float(np.median(ibis))
+        inliers = ibis[(ibis > med * 0.75) & (ibis < med * 1.25)]
+        if len(inliers) < 3:
+            inliers = ibis
+        period = float(np.mean(inliers))               # averaged → steady decimals
+        if period <= 0:
+            return None, 0.0
+        bpm = self._octave_fold(60.0 / period, self._locked_bpm)
+        cv  = float(np.std(inliers) / period)          # interval spread
+        conf = max(0.0, min(1.0, 1.0 - cv * 6.0)) * min(1.0, len(inliers) / 16.0)
+        return bpm, conf
 
     def _fallback_tick(self, mono):
         energy = float(np.mean(mono ** 2))
@@ -452,7 +601,7 @@ class AudioBPMDetector:
                 if len(itvs) >= 2:
                     bpm = 60.0 / float(np.median(itvs))
                     if self._cb:
-                        self._cb(bpm, 0.5)   # 0.5 = estimated, not measured
+                        self._cb(bpm, 0.5, "tracking")   # 0.5 = estimated
         self._e_prev = energy * 0.3 + self._e_prev * 0.7
 
 # ── Patterns ──────────────────────────────────────────────────────────────────
@@ -524,8 +673,8 @@ class BlindsApp(tk.Tk):
         self._clock      = BeatClock(120.0)
         self._bpm_on     = tk.BooleanVar(value=False)
         self._bpm_var    = tk.DoubleVar(value=120.0)
-        self._gap_pos_var  = tk.DoubleVar(value=50.0)  # 0=bottom, 100=top
-        self._gap_size_var = tk.DoubleVar(value=25.0)  # max gap size %
+        self._gap_pos_var  = tk.DoubleVar(value=50.0)  # 0=bottom, 100=top (%)
+        self._gap_size_var = tk.DoubleVar(value=5.0)   # max gap size (% of window)
         self._size_sync_beats: "float | None" = None   # None = static
         self._pos_sync_beats:  "float | None" = None
         self._size_sync_btns: list = []
@@ -548,7 +697,8 @@ class BlindsApp(tk.Tk):
                         for _ in FRAMES]
         self._plbls  = []   # list of {"b": Label, "t": Label} — filled below
         self._sbts   = []   # speed buttons
-        self._canvas = None # preview canvas — assigned in _build_preview
+        self._canvas = None # preview canvas — lives in its own Toplevel window
+        self._preview_win = None  # the preview Toplevel
         self._beat   = 0.0  # latest beat value, read by _draw_preview
 
         self._cur_pos    = [(0.0, 0.0)] * len(FRAMES)  # slew-rate position tracker
@@ -558,11 +708,20 @@ class BlindsApp(tk.Tk):
         self._audio_det  = AudioBPMDetector() if AUDIO_AVAILABLE else None
         self._audio_devs: list = []  # populated in _build_audio_section
 
+        # Per-window status from the firmware (updated by the telemetry thread).
+        # keys: cal[2], homed[2], max[2], pos[2], seen(bool/timestamp)
+        self._status = [{"cal": [0, 0], "homed": [0, 0], "max": [0, 0],
+                         "pos": [0, 0], "seen": 0.0} for _ in FRAMES]
+        self._stat_lbls: list = []   # per-window status labels — filled in _frame_card
+
         self._build_ui()
+        self._open_preview()                  # preview lives in its own window
         self._bpm_on.trace_add("write", self._on_bpm_toggle)
         threading.Thread(target=self._anim_loop, daemon=True).start()
+        threading.Thread(target=self._telemetry_loop, daemon=True).start()
         self._heartbeat()
         self._poll_link()
+        self.after(300, self._refresh_status_labels)
         self.after(120, self._draw_preview)   # first draw after layout
         self.protocol("WM_DELETE_WINDOW", self._on_close)
 
@@ -579,8 +738,6 @@ class BlindsApp(tk.Tk):
         _hr(self, top=10, bot=10)
         self._build_frame_cards()
         self._build_artnet_controls()
-        _hr(self)
-        self._build_preview()
         _hr(self)
         self._build_gap_section()
         _hr(self)
@@ -630,6 +787,15 @@ class BlindsApp(tk.Tk):
 
         self._plbls.append(lbls)
 
+        # Calibration trigger + live status (steps) for this window
+        tk.Button(card, text="Calibrate window", font=("Segoe UI", 8),
+                  bg=BTN, fg=BTNFG, relief="flat", padx=8, pady=4, cursor="hand2",
+                  command=lambda i=col: self._calibrate_window(i)).pack(pady=(8, 2))
+        stat = tk.Label(card, text="status: —", font=("Consolas", 8),
+                        bg=CARD, fg=DIM, justify="left", anchor="w")
+        stat.pack(fill="x")
+        self._stat_lbls.append(stat)
+
     # ── Art-Net controls ─────────────────────────────────────────────────────
 
     def _build_artnet_controls(self):
@@ -654,25 +820,56 @@ class BlindsApp(tk.Tk):
         bcast_btn.pack(side="right", padx=(4, 0))
         _hov(bcast_btn)
 
+        cal_all_btn = tk.Button(row, text="Calibrate all windows",
+                                font=("Segoe UI", 8), bg=BTN, fg=YELLOW,
+                                relief="flat", padx=8, pady=3, cursor="hand2",
+                                command=self._calibrate_all)
+        cal_all_btn.pack(side="left", padx=(12, 0))
+        _hov(cal_all_btn)
+
+        prev_btn = tk.Button(row, text="⊞ Preview window",
+                             font=("Segoe UI", 8), bg=BTN, fg=BLUE,
+                             relief="flat", padx=8, pady=3, cursor="hand2",
+                             command=self._open_preview)
+        prev_btn.pack(side="left", padx=(8, 0))
+        _hov(prev_btn)
+
     # ── Preview canvas ───────────────────────────────────────────────────────
 
-    def _build_preview(self):
-        wrapper = tk.Frame(self, bg=BG)
-        wrapper.pack(fill="x", padx=16, pady=(0, 4))
-        tk.Label(wrapper, text="PREVIEW",
-                 font=("Segoe UI", 9, "bold"), bg=BG, fg=DIM).pack(anchor="w")
-        self._canvas = tk.Canvas(wrapper, bg="#11111b", height=170,
-                                 highlightthickness=0, cursor="arrow")
-        self._canvas.pack(fill="x", pady=(4, 0))
-        self._canvas.bind("<Configure>", lambda _: self._draw_preview())
+    def _open_preview(self):
+        """Open (or re-show) the preview in its own resizable window."""
+        if self._preview_win is not None and self._preview_win.winfo_exists():
+            self._preview_win.deiconify()
+            self._preview_win.lift()
+            return
+        win = tk.Toplevel(self)
+        win.title("Blinds Preview")
+        win.configure(bg=BG)
+        win.geometry("760x340")
+        win.minsize(400, 200)
+        tk.Label(win, text="PREVIEW",
+                 font=("Segoe UI", 9, "bold"), bg=BG, fg=DIM).pack(anchor="w", padx=12, pady=(8, 0))
+        self._canvas = tk.Canvas(win, bg="#11111b", highlightthickness=0, cursor="arrow")
+        self._canvas.pack(fill="both", expand=True, padx=12, pady=10)
+        # No <Configure> binding: the continuous 60 fps loop already redraws at
+        # the current size every frame, so resizing is handled without spawning
+        # extra (overlapping) draw loops.
+        # Closing the window just hides it (re-open with the Preview button).
+        win.protocol("WM_DELETE_WINDOW", win.withdraw)
+        self._preview_win = win
 
     def _draw_preview(self):
-        c = self._canvas
-        if c is None:
+        c   = self._canvas
+        win = self._preview_win
+        # Keep the loop alive but idle while the preview is closed/hidden.
+        if (c is None or not c.winfo_exists() or win is None
+                or not win.winfo_exists() or not win.winfo_viewable()):
+            self.after(200, self._draw_preview)
             return
         W = c.winfo_width()
         H = c.winfo_height()
         if W < 10:
+            self.after(100, self._draw_preview)
             return
         c.delete("all")
 
@@ -702,41 +899,15 @@ class BlindsApp(tk.Tk):
             # ── Window reveal (light area) ────────────────────────────────
             c.create_rectangle(x0, y0, x1, y1, fill="#d0e8ff", outline="")
 
-            # Light intensity: brighter when gap is wider
-            gap_frac = max(0.0, (bot_edge - top_edge) / win_h)
-            # Subtle light glow in open gap
-            if bot_edge > top_edge:
-                glow_steps = 4
-                for s in range(glow_steps):
-                    shrink = s * 2
-                    bright = int(208 + gap_frac * 40 + s * 3)
-                    bright = min(255, bright)
-                    col = f"#{bright:02x}{min(255,bright+4):02x}ff"
-                    c.create_rectangle(x0 + shrink, max(y0, top_edge) + shrink,
-                                       x1 - shrink, min(y1, bot_edge) - shrink,
-                                       fill=col, outline="")
-
-            # ── Top blind ────────────────────────────────────────────────
+            # ── Top blind (single flat surface) ──────────────────────────
             if top_edge > y0:
                 c.create_rectangle(x0, y0, x1, top_edge, fill="#4c4f69", outline="")
-                # Slat lines
-                slat_y = y0 + 7
-                while slat_y < top_edge - 1:
-                    c.create_line(x0 + 1, slat_y, x1 - 1, slat_y,
-                                  fill="#3d3f57", width=1)
-                    slat_y += 7
                 # Bottom hem of top blind
                 c.create_line(x0, top_edge, x1, top_edge, fill="#7480c2", width=2)
 
-            # ── Bottom blind ─────────────────────────────────────────────
+            # ── Bottom blind (single flat surface) ───────────────────────
             if bot_edge < y1:
                 c.create_rectangle(x0, bot_edge, x1, y1, fill="#4c4f69", outline="")
-                # Slat lines
-                slat_y = int(bot_edge) + 7
-                while slat_y < y1 - 1:
-                    c.create_line(x0 + 1, slat_y, x1 - 1, slat_y,
-                                  fill="#3d3f57", width=1)
-                    slat_y += 7
                 # Top hem of bottom blind
                 c.create_line(x0, bot_edge, x1, bot_edge, fill="#7480c2", width=2)
 
@@ -773,18 +944,19 @@ class BlindsApp(tk.Tk):
     def _build_gap_section(self):
         self._param_block(
             title="GAP POSITION   (0 % = bottom  •  100 % = top)",
-            var=self._gap_pos_var, init_lbl=" 50%",
+            var=self._gap_pos_var, vmax=100, unit="%",
             presets=[("Bottom", 0), ("Centre", 50), ("Top", 100)],
             sync_attr="_pos_sync_btns",  set_sync_fn=self._set_pos_sync,
             pat_attr="_pos_pbts",        set_pat_fn=self._set_pos_pattern)
 
         _hr(self)
 
+        # Gap Size is a small % of the (tall) window — only a few % is useful.
         self._param_block(
-            title="GAP SIZE   (how wide the light band opens)",
-            var=self._gap_size_var, init_lbl=" 25%",
-            presets=[("Closed", 0), ("10%", 10), ("25%", 25),
-                     ("50%", 50), ("Open", 100)],
+            title="GAP SIZE   (% of window the band opens)",
+            var=self._gap_size_var, vmax=25, unit="%",
+            presets=[("Closed", 0), ("2%", 2), ("5%", 5),
+                     ("10%", 10), ("15%", 15), ("25%", 25)],
             sync_attr="_size_sync_btns", set_sync_fn=self._set_size_sync,
             pat_attr="_size_pbts",       set_pat_fn=self._set_size_pattern)
 
@@ -793,28 +965,31 @@ class BlindsApp(tk.Tk):
             v.trace_add("write", lambda *_: (
                 None if self._bpm_on.get() else self._push_from_gap_controls()))
 
-    def _param_block(self, title, var, init_lbl, presets,
+    def _param_block(self, title, var, vmax, unit, presets,
                      sync_attr, set_sync_fn, pat_attr, set_pat_fn):
-        """One self-contained block: percentage slider + presets, beat-sync
-        selector, and an independent pattern selector."""
+        """One self-contained block: value slider (0..vmax, labelled with `unit`)
+        + presets, beat-sync selector, and an independent pattern selector."""
         sec = tk.Frame(self, bg=BG)
         sec.pack(padx=20, pady=(4, 4), fill="x")
 
         tk.Label(sec, text=title, font=("Segoe UI", 10, "bold"),
                  bg=BG, fg=FG).pack(anchor="w", pady=(0, 4))
 
-        # Percentage slider + value + presets
+        def _fmt(v):
+            return f"{int(round(v)):3d}{unit}"
+
+        # Value slider + readout + presets
         r = tk.Frame(sec, bg=BG)
         r.pack(fill="x", pady=2)
         tk.Label(r, text="Amount:", font=("Segoe UI", 9),
                  bg=BG, fg=FG, width=8, anchor="w").pack(side="left")
-        ttk.Scale(r, from_=0, to=100, orient="horizontal",
+        ttk.Scale(r, from_=0, to=vmax, orient="horizontal",
                   variable=var, length=170).pack(side="left", padx=4)
-        val_lbl = tk.Label(r, text=init_lbl, font=("Segoe UI", 9, "bold"),
-                           bg=BG, fg=GREEN, width=5)
+        val_lbl = tk.Label(r, text=_fmt(var.get()), font=("Segoe UI", 9, "bold"),
+                           bg=BG, fg=GREEN, width=6)
         val_lbl.pack(side="left", padx=(0, 10))
         var.trace_add("write",
-            lambda *_, v=var, l=val_lbl: l.config(text=f"{int(v.get()):3d}%"))
+            lambda *_, v=var, l=val_lbl: l.config(text=_fmt(v.get())))
         for lbl, pv in presets:
             b = tk.Button(r, text=lbl, font=("Segoe UI", 8), bg=BTN, fg=BTNFG,
                           relief="flat", padx=6, pady=2, cursor="hand2",
@@ -883,13 +1058,13 @@ class BlindsApp(tk.Tk):
                  bg=BG, fg=FG, width=5, anchor="w").pack(side="left")
         ttk.Scale(bpm_row, from_=40, to=240, orient="horizontal",
                   variable=self._bpm_var, length=200).pack(side="left", padx=4)
-        bpm_val = tk.Label(bpm_row, text="120", font=("Segoe UI", 11, "bold"),
-                           bg=BG, fg=YELLOW, width=4)
+        bpm_val = tk.Label(bpm_row, text="120.00", font=("Segoe UI", 11, "bold"),
+                           bg=BG, fg=YELLOW, width=7)
         bpm_val.pack(side="left")
 
         def _on_bpm(*_):
             v = self._bpm_var.get()
-            bpm_val.config(text=str(int(v)))
+            bpm_val.config(text=f"{v:.2f}")
             self._clock.bpm = v
         self._bpm_var.trace_add("write", _on_bpm)
 
@@ -1063,6 +1238,70 @@ class BlindsApp(tk.Tk):
             v.set(f["ip"])
         self._artnet_status.config(text="Unicast to individual IPs", fg=DIM)
 
+    # ── Calibration + status telemetry (OSC) ──────────────────────────────────
+
+    def _calibrate_window(self, idx: int):
+        """Trigger calibration of both screens on one window via OSC."""
+        osc_send(self._ip_vars[idx].get(), "/calibrate")
+        log.info("Calibrate requested: window %d (%s)", idx + 1, self._ip_vars[idx].get())
+
+    def _calibrate_all(self):
+        for v in dict.fromkeys(self._ip_vars[i].get() for i in range(len(FRAMES))):
+            osc_send(v, "/calibrate")
+        log.info("Calibrate requested: all windows")
+
+    def _telemetry_loop(self):
+        """Poll each window for status and store replies (mapped by source IP)."""
+        while True:
+            try:
+                # Map replies by source IP. Include both the (user-editable) send
+                # targets and the default device IPs, so replies are recognised
+                # even when sending to a broadcast address.
+                reply_map = {}
+                poll_targets = []
+                for i in range(len(FRAMES)):
+                    tgt = self._ip_vars[i].get()
+                    poll_targets.append(tgt)
+                    reply_map[tgt] = i
+                    reply_map[FRAMES[i]["ip"]] = i
+                for ip in dict.fromkeys(poll_targets):
+                    osc_send(ip, "/status")
+                # Collect replies for a short window
+                deadline = time.perf_counter() + 0.25
+                while time.perf_counter() < deadline:
+                    try:
+                        data, addr = _osc_sock.recvfrom(512)
+                    except (socket.timeout, OSError):
+                        break
+                    a, args = _osc_parse(data)
+                    idx = reply_map.get(addr[0])
+                    if a == "/status" and idx is not None and len(args) >= 8:
+                        st = self._status[idx]
+                        st["cal"]   = [args[0], args[4]]
+                        st["homed"] = [args[1], args[5]]
+                        st["max"]   = [args[2], args[6]]
+                        st["pos"]   = [args[3], args[7]]
+                        st["seen"]  = time.perf_counter()
+            except Exception:
+                pass
+            time.sleep(0.3)
+
+    def _refresh_status_labels(self):
+        now = time.perf_counter()
+        for i, lbl in enumerate(self._stat_lbls):
+            st = self._status[i]
+            online = (now - st["seen"]) < 2.0
+            if not online:
+                lbl.config(text="offline", fg=RED)
+            else:
+                def line(j, name):
+                    if st["cal"][j]:
+                        return f"{name} {st['pos'][j]:>6} / {st['max'][j]} ✓"
+                    return f"{name}  not calibrated"
+                lbl.config(text=line(0, "B") + "\n" + line(1, "T"),
+                           fg=GREEN if (st["cal"][0] and st["cal"][1]) else YELLOW)
+        self.after(300, self._refresh_status_labels)
+
     # ── Audio BPM section ────────────────────────────────────────────────────
 
     def _build_audio_section(self):
@@ -1120,7 +1359,7 @@ class BlindsApp(tk.Tk):
         tk.Label(st, text="Detected:", font=("Segoe UI", 9),
                  bg=BG, fg=FG, width=9, anchor="w").pack(side="left")
         self._audio_bpm_lbl = tk.Label(st, text="---",
-                                        font=("Segoe UI", 14, "bold"), bg=BG, fg=YELLOW, width=5)
+                                        font=("Segoe UI", 14, "bold"), bg=BG, fg=YELLOW, width=7)
         self._audio_bpm_lbl.pack(side="left")
         tk.Label(st, text="BPM", font=("Segoe UI", 9),
                  bg=BG, fg=DIM).pack(side="left", padx=(2, 12))
@@ -1153,22 +1392,23 @@ class BlindsApp(tk.Tk):
                 log.error("Audio start failed: %s", exc, exc_info=True)
                 self._audio_conf_lbl.config(text=str(exc), fg=RED)
 
-    def _on_audio_bpm(self, bpm: float, confidence: float):
-        # Called from the sounddevice background thread — bounce to main thread.
-        self.after(0, lambda b=bpm, c=confidence: self._apply_audio_bpm(b, c))
+    def _on_audio_bpm(self, bpm: float, confidence: float, status: str = "tracking"):
+        # Called from the audio background thread — bounce to the main thread.
+        self.after(0, lambda b=bpm, c=confidence, s=status: self._apply_audio_bpm(b, c, s))
 
-    def _apply_audio_bpm(self, bpm: float, confidence: float):
-        self._audio_bpm_lbl.config(text=str(int(bpm)), fg=GREEN if confidence > 0.6 else YELLOW)
+    def _apply_audio_bpm(self, bpm: float, confidence: float, status: str = "tracking"):
+        held = (status == "hold")
+        col  = BLUE if held else (GREEN if confidence > 0.6 else YELLOW)
+        self._audio_bpm_lbl.config(text=f"{bpm:.2f}", fg=col)
         if _AUBIO_OK:
             filled = int(round(confidence * 5))
             dots   = "●" * filled + "○" * (5 - filled)
-            self._audio_conf_lbl.config(
-                text=f"conf {dots} {confidence:.2f}",
-                fg=GREEN if confidence > 0.6 else YELLOW)
+            tag    = "HOLD (break)" if held else "lock"
+            self._audio_conf_lbl.config(text=f"{tag} {dots} {confidence:.2f}", fg=col)
         else:
             self._audio_conf_lbl.config(text="onset detected", fg=DIM)
-        # Drive the BPM clock
-        self._bpm_var.set(round(bpm, 1))
+        # Drive the BPM clock at full precision (keep the decimals).
+        self._bpm_var.set(round(bpm, 3))
 
     def _poll_audio_level(self):
         if self._audio_det is not None and self._audio_det.running:
