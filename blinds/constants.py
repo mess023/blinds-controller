@@ -101,11 +101,11 @@ APC_CC_DEVICE_KNOB_RING_BASE = 0x18   # 24 — device knob 1 ring-type CC
 # then lower row (knobs 5-8 = offsets 4-7).
 APC_BEAT_KNOB_ORDER = [0, 1, 2, 3, 4, 5, 6, 7]
 
-# Device control buttons below the knobs: 2 rows × 4 buttons.
-# Top row (left to right): notes 64-67, Bottom row: notes 72-75.
-APC_NOTE_DEVICE_BTN_TOP = [64, 65, 66, 67]
-APC_NOTE_DEVICE_BTN_BOT = [72, 73, 74, 75]
-APC_NOTE_DEVICE_BTN_ALL = APC_NOTE_DEVICE_BTN_TOP + APC_NOTE_DEVICE_BTN_BOT
+# Device control buttons: 8-beat chase sequence (notes from MIDI mapping image).
+# Beat order: DEVICE LEFT, DEVICE RIGHT, BANK LEFT, BANK RIGHT,
+#             DEVICE ON/OFF, DEVICE LOCK, CLIP/DEVICE VIEW, DETAIL VIEW
+APC_NOTE_DEVICE_BTN_ALL = [0x3A, 0x3B, 0x3C, 0x3D, 0x3E, 0x3F, 0x40, 0x41]
+# = [58, 59, 60, 61, 62, 63, 64, 65]
 
 # Single-style ring: 15 cc values, one per LED position (0 = leftmost).
 # Formula: centre of each 127/15-wide bucket.
