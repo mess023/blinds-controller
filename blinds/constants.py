@@ -145,8 +145,8 @@ APC40_POS = {
     "btn_link":        (805, 204),   # USER         → Ableton Link toggle
     "btn_resync":      (886, 152),   # METRONOME    → resync phase
     "btn_tap":         (967, 152),   # TAP TEMPO    → tap tempo
-    "btn_nudge_plus":  (967, 204),   # NUDGE + (right button)
-    "btn_nudge_minus": (886, 204),   # NUDGE − (left button)
+    "btn_nudge_plus":  (886, 204),   # NUDGE + — image label is on the LEFT button
+    "btn_nudge_minus": (967, 204),   # NUDGE − — image label is on the RIGHT button
     # Gap Position fader (leftmost channel fader 1)
     "fader_1":      (47,  520, 57, 188),   # x_center, y_top, w, h
     # Motor Speed fader (master fader, far right of the channel strip)
