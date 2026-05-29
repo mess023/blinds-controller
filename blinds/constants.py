@@ -131,36 +131,38 @@ APC_CC_GAP_SIZE      = 48   # CC 48  → gap size 0–25 %
 
 # ── APC40 canvas layout (image background + overlaid widgets) ────────────────
 # Pixel positions are measured on the EMPTY image after rescaling to APC40_W×H.
-# Tweak APC40_POS if a control sits off-centre over the underlying art.
-APC40_W = 1100
+# Canvas dimensions match original image aspect ratio (4968:2982 = 1.666:1).
+# Height held at 733px; width scaled to 1222px for correct aspect ratio.
+# All coordinates scaled by factor 1222/1100 = 1.111 for X, 1.0 for Y.
+APC40_W = 1222
 APC40_H = 733
 APC40_IMG_PATH = os.path.join(
     os.path.dirname(os.path.abspath(__file__)), "..", "assets", "apc40_mk2-EMPTY.png")
 
 APC40_POS = {
     # Clip grid: (row, col) centre = origin + (col*dx, row*dy). Pad = w × h.
-    # Values measured by sampling yellow-pad pixels in the resized image.
-    "clip_origin": (50, 124),    # row 0 col 0 centre on 1100×733 image
-    "clip_dx":     86,
+    # All coordinates scaled by 1.111 (1222/1100) for correct aspect ratio.
+    "clip_origin": (56, 124),     # row 0 col 0 centre
+    "clip_dx":     96,            # spacing between columns
     "clip_dy":     43,
     "clip_w":      70,
     "clip_h":      32,
     # Master section buttons (centres, measured from cream-button pixels)
-    "btn_bpm_sync":    (805,  94),   # PAN          → BPM sync toggle
-    "btn_audio_sync":  (805, 152),   # SENDS        → audio detect toggle
-    "btn_link":        (805, 204),   # USER         → Ableton Link toggle
-    "btn_resync":      (886, 152),   # METRONOME    → resync phase
-    "btn_tap":         (967, 152),   # TAP TEMPO    → tap tempo
-    "btn_nudge_plus":  (886, 204),   # NUDGE + — image label is on the LEFT button
-    "btn_nudge_minus": (967, 204),   # NUDGE − — image label is on the RIGHT button
+    "btn_bpm_sync":    (894,  94),   # PAN          → BPM sync toggle
+    "btn_audio_sync":  (894, 152),   # SENDS        → audio detect toggle
+    "btn_link":        (894, 204),   # USER         → Ableton Link toggle
+    "btn_resync":      (983, 152),   # METRONOME    → resync phase
+    "btn_tap":        (1073, 152),   # TAP TEMPO    → tap tempo
+    "btn_nudge_plus":  (983, 204),   # NUDGE + — image label is on the LEFT button
+    "btn_nudge_minus":(1073, 204),   # NUDGE − — image label is on the RIGHT button
     # Gap Position fader (leftmost channel fader 1)
-    "fader_1":      (47,  520, 57, 188),   # x_center, y_top, w, h
+    "fader_1":      (52,  520, 63, 188),   # x_center, y_top, w, h
     # Motor Speed fader (master fader, far right of the channel strip)
-    "fader_master": (722, 520, 57, 188),
+    "fader_master": (801, 520, 63, 188),
     # Gap Size knob (top-left of the 8 top knobs)
-    "knob_gap_size": (47, 54),           # x, y centre — radius ~22
+    "knob_gap_size": (52, 54),           # x, y centre — radius ~22
     # BPM display — above the master button cluster
-    "bpm_display": (927, 50),
+    "bpm_display": (1028, 50),
 }
 
 # ── Colours (Catppuccin Mocha) ────────────────────────────────────────────────

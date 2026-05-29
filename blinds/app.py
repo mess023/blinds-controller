@@ -160,23 +160,20 @@ class BlindsApp(tk.Tk):
         # Center column: APC40 visualisation + mapped clickable controls
         self._build_apc40_canvas(parent=main)
 
-        # Right column: Everything else (config controls)
+        # Right column: Art-Net controls and audio device selection
+        # (Gap Position, Gap Size, and BPM controls are on the APC40 canvas)
         right_col = tk.Frame(main, bg=BG)
         right_col.pack(side="right", fill="both", expand=True, padx=(8, 0))
 
         _hr(right_col)
         self._build_artnet_controls(parent=right_col)
         _hr(right_col)
-        self._build_gap_section(parent=right_col)
-        _hr(right_col)
-        self._build_bpm_section(parent=right_col)
-        _hr(right_col)
         self._build_audio_section(parent=right_col)
         tk.Frame(right_col, bg=BG, height=14).pack()
 
         # Constrain window so the APC40 canvas always shows fully.
-        # Width: frames (220) + apc40 (1100) + options (400) + margins = ~1800px
-        self.minsize(1800, 800)
+        # Width: frames (220) + apc40 (1222) + options (400) + margins = ~1900px
+        self.minsize(1900, 800)
 
     # ── APC40 image canvas with overlaid mapped controls ─────────────────────
     # All overlays are CANVAS ITEMS, not widgets — so no opaque button face
@@ -315,6 +312,11 @@ class BlindsApp(tk.Tk):
         # ── Gap Position fader: draggable yellow marker line ────────────────
         fx, fy, fw, fh = APC40_POS["fader_1"]
 
+        # Label above fader
+        c.create_text(fx, fy - 14, text="GAP POS",
+                     fill=self.APC_LABEL_PRINTED, font=("Segoe UI", 7, "bold"),
+                     anchor="center")
+
         def marker_y() -> float:
             v = max(0.0, min(100.0, self._gap_pos_var.get()))
             return fy + (100.0 - v) / 100.0 * fh
@@ -343,6 +345,12 @@ class BlindsApp(tk.Tk):
         # ── Motor Speed fader (master fader — far right of channel strip) ───
         sx, sy, sw, sh = APC40_POS["fader_master"]
 
+        # Motor speed percentage display above fader
+        self._apc_motor_speed_text = c.create_text(
+            sx, sy - 14, text="0%/s",
+            fill=self.APC_BPM_FG, font=("Segoe UI", 8, "bold"),
+            anchor="center")
+
         def motor_marker_y() -> float:
             v = max(5.0, min(100.0, self._max_spd.get()))
             return sy + (1.0 - (v - 5.0) / 95.0) * sh
@@ -366,12 +374,21 @@ class BlindsApp(tk.Tk):
         def _update_motor_marker(*_):
             my = motor_marker_y()
             c.coords(self._apc_motor_marker, sx - sw / 2, my, sx + sw / 2, my)
+            # Update motor speed percentage text
+            spd = int(round(self._max_spd.get()))
+            c.itemconfig(self._apc_motor_speed_text, text=f"{spd}%/s")
         self._max_spd.trace_add("write", _update_motor_marker)
 
         # ── Gap Size knob (top-left of the 8 top knobs) ─────────────────────
         # Click+drag vertically or scroll-wheel to change. Centre text shows
         # the current value in yellow over the dark knob body.
         kx, ky = APC40_POS["knob_gap_size"]
+
+        # Label above knob
+        c.create_text(kx, ky - 30, text="GAP SIZE",
+                     fill=self.APC_LABEL_PRINTED, font=("Segoe UI", 7, "bold"),
+                     anchor="center")
+
         self._apc_gap_size_text = c.create_text(
             kx, ky, text=f"{self._gap_size_var.get():.1f}%",
             fill=self.APC_BPM_FG, font=("Segoe UI", 9, "bold"),
