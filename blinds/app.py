@@ -433,6 +433,12 @@ class BlindsApp(tk.Tk):
 
         # ── BPM fine adjust knob (±0.01 per encoder click) ──────────────────
         bfx, bfy = APC40_POS["knob_bpm_fine"]
+
+        # Label above knob
+        c.create_text(bfx, bfy - 28, text="BPM fine adjust",
+                     fill=self.APC_LABEL_PRINTED, font=("Segoe UI", 7, "bold"),
+                     anchor="center")
+
         self._apc_bpm_fine_text = c.create_text(
             bfx, bfy, text="◇",
             fill=self.APC_BPM_FG, font=("Segoe UI", 16, "bold"),
