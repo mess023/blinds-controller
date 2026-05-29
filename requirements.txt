@@ -16,3 +16,10 @@ aalink
 # Windows-only: capture system audio (WASAPI loopback) so you can analyse the
 # music playing on the PC without a physical input. Ignored on Linux/macOS.
 pyaudiowpatch ; sys_platform == "win32"
+
+# APC40 MK2 (and any class-compliant MIDI device) ─────────────────────────────
+mido
+python-rtmidi
+
+# APC40 background image rendering in the GUI ─────────────────────────────────
+Pillow

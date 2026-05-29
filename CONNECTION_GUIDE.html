@@ -1,0 +1,707 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Blinds Frame — Connection Guide</title>
+  <style>
+    /* ── Reset & base ───────────────────────────────────────────────── */
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    html { font-size: 16px; }
+    body {
+      font-family: "Segoe UI", system-ui, sans-serif;
+      background: #0f1117;
+      color: #c9d1d9;
+      line-height: 1.6;
+    }
+
+    /* ── Layout ─────────────────────────────────────────────────────── */
+    .page { max-width: 960px; margin: 0 auto; padding: 48px 24px 80px; }
+
+    /* ── Typography ──────────────────────────────────────────────────── */
+    h1 { font-size: 2.2rem; font-weight: 700; color: #fff; letter-spacing: -0.5px; }
+    h2 { font-size: 1.35rem; font-weight: 600; color: #fff;
+         margin: 48px 0 16px; padding-bottom: 8px;
+         border-bottom: 2px solid #21262d; }
+    h3 { font-size: 1.05rem; font-weight: 600; color: #e6edf3; margin: 28px 0 10px; }
+    p  { margin-bottom: 12px; color: #8b949e; }
+    a  { color: #58a6ff; text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    strong { color: #e6edf3; }
+    code {
+      font-family: "Cascadia Code", "Fira Code", "Consolas", monospace;
+      font-size: 0.875rem;
+      background: #161b22;
+      border: 1px solid #30363d;
+      border-radius: 4px;
+      padding: 2px 6px;
+      color: #79c0ff;
+    }
+    pre {
+      background: #161b22;
+      border: 1px solid #30363d;
+      border-radius: 8px;
+      padding: 18px 20px;
+      overflow-x: auto;
+      font-family: "Cascadia Code", "Fira Code", "Consolas", monospace;
+      font-size: 0.85rem;
+      line-height: 1.55;
+      color: #e6edf3;
+      margin: 12px 0 20px;
+    }
+    pre .c  { color: #8b949e; }   /* comment */
+    pre .k  { color: #ff7b72; }   /* keyword / address */
+    pre .v  { color: #79c0ff; }   /* value / number */
+    pre .s  { color: #a5d6ff; }   /* string / path */
+    pre .h  { color: #ffa657; }   /* highlight */
+
+    /* ── Header ──────────────────────────────────────────────────────── */
+    .header {
+      display: flex; align-items: flex-start;
+      gap: 24px; margin-bottom: 40px;
+    }
+    .header-icon {
+      font-size: 3rem; line-height: 1;
+      flex-shrink: 0; margin-top: 4px;
+    }
+    .header-meta { display: flex; gap: 10px; margin-top: 10px; flex-wrap: wrap; }
+    .badge {
+      display: inline-block;
+      font-size: 0.75rem; font-weight: 600; letter-spacing: 0.4px;
+      padding: 3px 10px; border-radius: 20px;
+    }
+    .badge-blue   { background: #1f3d6e; color: #79c0ff; border: 1px solid #1f6feb; }
+    .badge-green  { background: #1a3628; color: #56d364; border: 1px solid #2ea043; }
+    .badge-orange { background: #3d2200; color: #ffa657; border: 1px solid #d1811a; }
+    .badge-gray   { background: #21262d; color: #8b949e; border: 1px solid #30363d; }
+
+    /* ── Quick-ref card grid ─────────────────────────────────────────── */
+    .qr-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+      gap: 14px;
+      margin: 20px 0 36px;
+    }
+    .qr-card {
+      background: #161b22;
+      border: 1px solid #30363d;
+      border-radius: 10px;
+      padding: 16px 18px;
+    }
+    .qr-card .label {
+      font-size: 0.7rem; font-weight: 700; letter-spacing: 1px;
+      text-transform: uppercase; color: #8b949e; margin-bottom: 6px;
+    }
+    .qr-card .value {
+      font-family: "Cascadia Code", "Consolas", monospace;
+      font-size: 1.15rem; font-weight: 600; color: #e6edf3;
+    }
+    .qr-card .sub { font-size: 0.78rem; color: #6e7681; margin-top: 2px; }
+
+    /* ── Network diagram ─────────────────────────────────────────────── */
+    .diagram {
+      background: #161b22;
+      border: 1px solid #30363d;
+      border-radius: 10px;
+      padding: 24px;
+      margin: 20px 0;
+      overflow-x: auto;
+    }
+    .diagram-row {
+      display: flex; align-items: center; gap: 0;
+      justify-content: center; flex-wrap: nowrap;
+      min-width: 560px;
+    }
+    .diag-box {
+      background: #21262d;
+      border: 1px solid #30363d;
+      border-radius: 8px;
+      padding: 10px 16px;
+      text-align: center;
+      font-size: 0.82rem;
+      white-space: nowrap;
+    }
+    .diag-box .title  { font-weight: 700; color: #e6edf3; font-size: 0.88rem; }
+    .diag-box .detail { color: #6e7681; font-size: 0.75rem; margin-top: 2px; }
+    .diag-box.blue  { border-color: #1f6feb; background: #1a2d4a; }
+    .diag-box.green { border-color: #2ea043; background: #1a3628; }
+    .diag-arrow {
+      flex: 1; min-width: 40px; max-width: 80px;
+      text-align: center; color: #30363d; font-size: 1.2rem; position: relative;
+    }
+    .diag-arrow .proto {
+      display: block; font-size: 0.65rem; font-weight: 700;
+      letter-spacing: 0.5px; color: #6e7681; margin-bottom: 2px;
+    }
+    .diag-frames {
+      display: flex; flex-direction: column; gap: 8px;
+    }
+
+    /* ── Tables ──────────────────────────────────────────────────────── */
+    .table-wrap { overflow-x: auto; margin: 12px 0 24px; border-radius: 8px;
+                  border: 1px solid #30363d; }
+    table { width: 100%; border-collapse: collapse; }
+    thead tr { background: #161b22; }
+    thead th {
+      padding: 11px 16px; text-align: left;
+      font-size: 0.78rem; font-weight: 700; letter-spacing: 0.6px;
+      text-transform: uppercase; color: #8b949e;
+      border-bottom: 1px solid #30363d;
+    }
+    tbody tr { border-bottom: 1px solid #21262d; transition: background 0.1s; }
+    tbody tr:last-child { border-bottom: none; }
+    tbody tr:hover { background: #1c2128; }
+    tbody td { padding: 10px 16px; font-size: 0.9rem; color: #c9d1d9; }
+    tbody td code { background: transparent; border: none; padding: 0;
+                    color: #79c0ff; }
+    .td-accent  { color: #ffa657 !important; font-weight: 600; }
+    .td-blue    { color: #79c0ff !important; }
+    .td-green   { color: #56d364 !important; }
+    .td-dim     { color: #6e7681 !important; font-size: 0.82rem; }
+
+    /* ── Section dividers with pill labels ───────────────────────────── */
+    .section-label {
+      display: inline-flex; align-items: center; gap: 8px;
+      font-size: 0.75rem; font-weight: 700; letter-spacing: 1px;
+      text-transform: uppercase; padding: 4px 12px;
+      border-radius: 20px; margin-bottom: 10px;
+    }
+    .sl-artnet { background: #1a2d4a; color: #79c0ff; border: 1px solid #1f6feb; }
+    .sl-osc    { background: #1a3628; color: #56d364; border: 1px solid #2ea043; }
+    .sl-net    { background: #3d2200; color: #ffa657; border: 1px solid #d1811a; }
+    .sl-calib  { background: #2d1f0e; color: #f0a875; border: 1px solid #875533; }
+
+    /* ── Callout boxes ───────────────────────────────────────────────── */
+    .callout {
+      display: flex; gap: 14px; align-items: flex-start;
+      padding: 14px 18px; border-radius: 8px; margin: 16px 0;
+    }
+    .callout-icon { font-size: 1.2rem; flex-shrink: 0; margin-top: 1px; }
+    .callout-body { font-size: 0.9rem; }
+    .callout-body strong { display: block; margin-bottom: 2px; }
+    .callout.tip   { background: #1a3628; border: 1px solid #2ea043; color: #c9d1d9; }
+    .callout.warn  { background: #2d1f0e; border: 1px solid #d1811a; color: #c9d1d9; }
+    .callout.info  { background: #1a2d4a; border: 1px solid #1f6feb; color: #c9d1d9; }
+
+    /* ── Inline pill ─────────────────────────────────────────────────── */
+    .pill {
+      display: inline-block; font-size: 0.72rem; font-weight: 700;
+      padding: 1px 7px; border-radius: 10px; vertical-align: middle;
+    }
+    .pill-blue  { background: #1f3d6e; color: #79c0ff; }
+    .pill-green { background: #1a3628; color: #56d364; }
+
+    /* ── Footer ──────────────────────────────────────────────────────── */
+    .footer {
+      margin-top: 64px; padding-top: 20px; border-top: 1px solid #21262d;
+      font-size: 0.8rem; color: #6e7681; text-align: center;
+    }
+
+    /* ── Print ───────────────────────────────────────────────────────── */
+    @media print {
+      body { background: #fff; color: #111; }
+      .page { padding: 20px; }
+      .qr-card, .diagram, .table-wrap, pre, .callout {
+        border-color: #ccc; background: #f9f9f9 !important;
+        color: #111 !important; break-inside: avoid;
+      }
+      h2 { border-color: #ccc; color: #111; }
+      code { background: #eee; color: #0050a0; border-color: #ccc; }
+      pre  { background: #f5f5f5 !important; color: #111 !important; }
+    }
+  </style>
+</head>
+<body>
+<div class="page">
+
+  <!-- ══ HEADER ══════════════════════════════════════════════════════ -->
+  <div class="header">
+    <div class="header-icon">🎭</div>
+    <div>
+      <h1>Motorised Blinds — Connection Guide</h1>
+      <p style="color:#8b949e; margin-top:6px; margin-bottom:0;">
+        Complete reference for lighting technicians — Art-Net &amp; OSC control of the 4 motorised window-blind frames.
+      </p>
+      <div class="header-meta">
+        <span class="badge badge-blue">Art-Net  UDP 6454</span>
+        <span class="badge badge-green">OSC  UDP 7000</span>
+        <span class="badge badge-orange">4 Frames</span>
+        <span class="badge badge-gray">WT32-ETH01  •  Wired Ethernet</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- ══ QUICK REFERENCE ══════════════════════════════════════════════ -->
+  <div class="section-label sl-net">⚡ Quick reference</div>
+  <div class="qr-grid">
+    <div class="qr-card">
+      <div class="label">Subnet</div>
+      <div class="value">10.0.0.x</div>
+      <div class="sub">Mask 255.255.255.0  •  Your PC must be on this subnet</div>
+    </div>
+    <div class="qr-card">
+      <div class="label">Art-Net port</div>
+      <div class="value">6454</div>
+      <div class="sub">UDP unicast or broadcast  •  Universe 1</div>
+    </div>
+    <div class="qr-card">
+      <div class="label">OSC port</div>
+      <div class="value">7000</div>
+      <div class="sub">UDP unicast per frame  •  float args 0.0–1.0</div>
+    </div>
+    <div class="qr-card">
+      <div class="label">Channels per frame</div>
+      <div class="value">4 ch</div>
+      <div class="sub">16-bit position per blind  •  2 blinds per frame</div>
+    </div>
+  </div>
+
+  <!-- ══ NETWORK SETUP ════════════════════════════════════════════════ -->
+  <h2>1 · Network Setup</h2>
+  <div class="section-label sl-net">🌐 Ethernet</div>
+  <p>Each frame runs on a wired Ethernet connection with a <strong>static IP address</strong>. Connect all four frames and your control PC to the same switch or router.</p>
+
+  <div class="callout warn">
+    <div class="callout-icon">⚠️</div>
+    <div class="callout-body">
+      <strong>Use wired Ethernet — no Wi-Fi</strong>
+      Art-Net and OSC require low-latency, loss-free communication. Wi-Fi jitter will cause stuttering blinds. A gigabit switch costs less than the headache.
+    </div>
+  </div>
+
+  <p>Configure your control PC to a static IP in the same subnet, e.g. <code>10.0.0.10</code>:</p>
+
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>Device</th>
+          <th>IP address</th>
+          <th>Role</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><strong>Frame 1</strong></td>
+          <td><code>10.0.0.101</code></td>
+          <td class="td-dim">Left-most window</td>
+        </tr>
+        <tr>
+          <td><strong>Frame 2</strong></td>
+          <td><code>10.0.0.102</code></td>
+          <td class="td-dim">Second window</td>
+        </tr>
+        <tr>
+          <td><strong>Frame 3</strong></td>
+          <td><code>10.0.0.103</code></td>
+          <td class="td-dim">Third window</td>
+        </tr>
+        <tr>
+          <td><strong>Frame 4</strong></td>
+          <td><code>10.0.0.104</code></td>
+          <td class="td-dim">Right-most window</td>
+        </tr>
+        <tr>
+          <td><strong>Control PC</strong></td>
+          <td><code>10.0.0.10</code> <span class="td-dim">(example)</span></td>
+          <td class="td-dim">Your console / laptop</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <!-- Network diagram -->
+  <div class="diagram">
+    <div style="text-align:center; font-size:0.75rem; font-weight:700; letter-spacing:1px; text-transform:uppercase; color:#6e7681; margin-bottom:18px;">Network topology</div>
+    <div class="diagram-row">
+      <div class="diag-box blue">
+        <div class="title">Control PC</div>
+        <div class="detail">10.0.0.10</div>
+        <div class="detail">Console / Laptop</div>
+      </div>
+      <div class="diag-arrow">
+        <span class="proto">UDP</span>
+        <span>──▶</span>
+      </div>
+      <div class="diag-box">
+        <div class="title">Switch</div>
+        <div class="detail">Gigabit recommended</div>
+      </div>
+      <div class="diag-arrow">
+        <span class="proto">ETH</span>
+        <span>──▶</span>
+      </div>
+      <div class="diag-frames">
+        <div class="diag-box green">
+          <div class="title">Frame 1–4</div>
+          <div class="detail">10.0.0.101 – .104</div>
+          <div class="detail">WT32-ETH01</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="callout tip">
+    <div class="callout-icon">💡</div>
+    <div class="callout-body">
+      <strong>Quick connectivity test</strong>
+      Open a terminal and run <code>ping 10.0.0.101</code>. If you get replies, the frame is online and reachable.
+    </div>
+  </div>
+
+  <!-- ══ ART-NET ══════════════════════════════════════════════════════ -->
+  <h2>2 · Art-Net Control</h2>
+  <div class="section-label sl-artnet">Art-Net  UDP 6454</div>
+
+  <p>
+    Art-Net is the primary control protocol and is compatible with any professional lighting console, media server, or software that supports DMX-over-Ethernet (MagicQ, ETC, Resolume, TouchDesigner, QLC+, etc.).
+    All four frames live in <strong>Universe 1</strong>, addressed as 4-channel fixtures. A single broadcast packet drives all four simultaneously.
+  </p>
+
+  <h3>Universe &amp; patch</h3>
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>Parameter</th>
+          <th>Value</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr><td>Protocol</td>           <td><code>Art-Net</code></td></tr>
+        <tr><td>Transport</td>          <td><code>UDP</code></td></tr>
+        <tr><td>Port</td>               <td><code>6454</code>  <span class="td-dim">(standard Art-Net port)</span></td></tr>
+        <tr><td>Universe</td>           <td><code>1</code>  <span class="td-dim">(Net 0 · Sub 0 · Universe 1 in most consoles)</span></td></tr>
+        <tr><td>Destination</td>        <td><code>Unicast to each frame IP</code>  <span class="td-dim">or broadcast 10.0.0.255</span></td></tr>
+        <tr><td>DMX packet length</td>  <td><code>512 bytes</code></td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="callout info">
+    <div class="callout-icon">ℹ️</div>
+    <div class="callout-body">
+      <strong>Broadcast vs. unicast</strong>
+      Sending to <code>10.0.0.255</code> (broadcast) delivers the same packet to all frames with one send.
+      Use unicast (<code>10.0.0.101</code> … <code>.104</code>) when you need per-frame override, or when the frames are on separate subnets.
+    </div>
+  </div>
+
+  <h3>DMX channel map</h3>
+  <p>
+    Each frame occupies <strong>4 consecutive DMX channels</strong>. Every blind position is encoded as a <strong>16-bit value split across two 8-bit channels</strong> (high byte first — MSB/LSB):
+  </p>
+  <p>
+    <code>Position = (ch_MSB × 256) + ch_LSB</code> &nbsp;→&nbsp; range <code>0</code> (fully retracted) to <code>65535</code> (fully extended).
+  </p>
+
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>Frame</th>
+          <th>IP</th>
+          <th>DMX ch</th>
+          <th>Function</th>
+          <th>Value</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td rowspan="4" style="vertical-align:middle; font-weight:700; color:#ffa657;">Frame&nbsp;1</td>
+          <td rowspan="4" style="vertical-align:middle;"><code>10.0.0.101</code></td>
+          <td><code>1</code></td>
+          <td>Bottom blind position <span class="pill pill-blue">MSB</span></td>
+          <td class="td-dim">0 – 255</td>
+        </tr>
+        <tr>
+          <td><code>2</code></td>
+          <td>Bottom blind position <span class="pill pill-green">LSB</span></td>
+          <td class="td-dim">0 – 255</td>
+        </tr>
+        <tr>
+          <td><code>3</code></td>
+          <td>Top blind position <span class="pill pill-blue">MSB</span></td>
+          <td class="td-dim">0 – 255</td>
+        </tr>
+        <tr>
+          <td><code>4</code></td>
+          <td>Top blind position <span class="pill pill-green">LSB</span></td>
+          <td class="td-dim">0 – 255</td>
+        </tr>
+        <tr style="border-top:2px solid #30363d;">
+          <td rowspan="4" style="vertical-align:middle; font-weight:700; color:#ffa657;">Frame&nbsp;2</td>
+          <td rowspan="4" style="vertical-align:middle;"><code>10.0.0.102</code></td>
+          <td><code>5</code></td>
+          <td>Bottom blind position <span class="pill pill-blue">MSB</span></td>
+          <td class="td-dim">0 – 255</td>
+        </tr>
+        <tr><td><code>6</code></td><td>Bottom blind position <span class="pill pill-green">LSB</span></td><td class="td-dim">0 – 255</td></tr>
+        <tr><td><code>7</code></td><td>Top blind position <span class="pill pill-blue">MSB</span></td><td class="td-dim">0 – 255</td></tr>
+        <tr><td><code>8</code></td><td>Top blind position <span class="pill pill-green">LSB</span></td><td class="td-dim">0 – 255</td></tr>
+        <tr style="border-top:2px solid #30363d;">
+          <td rowspan="4" style="vertical-align:middle; font-weight:700; color:#ffa657;">Frame&nbsp;3</td>
+          <td rowspan="4" style="vertical-align:middle;"><code>10.0.0.103</code></td>
+          <td><code>9</code></td>
+          <td>Bottom blind position <span class="pill pill-blue">MSB</span></td>
+          <td class="td-dim">0 – 255</td>
+        </tr>
+        <tr><td><code>10</code></td><td>Bottom blind position <span class="pill pill-green">LSB</span></td><td class="td-dim">0 – 255</td></tr>
+        <tr><td><code>11</code></td><td>Top blind position <span class="pill pill-blue">MSB</span></td><td class="td-dim">0 – 255</td></tr>
+        <tr><td><code>12</code></td><td>Top blind position <span class="pill pill-green">LSB</span></td><td class="td-dim">0 – 255</td></tr>
+        <tr style="border-top:2px solid #30363d;">
+          <td rowspan="4" style="vertical-align:middle; font-weight:700; color:#ffa657;">Frame&nbsp;4</td>
+          <td rowspan="4" style="vertical-align:middle;"><code>10.0.0.104</code></td>
+          <td><code>13</code></td>
+          <td>Bottom blind position <span class="pill pill-blue">MSB</span></td>
+          <td class="td-dim">0 – 255</td>
+        </tr>
+        <tr><td><code>14</code></td><td>Bottom blind position <span class="pill pill-green">LSB</span></td><td class="td-dim">0 – 255</td></tr>
+        <tr><td><code>15</code></td><td>Top blind position <span class="pill pill-blue">MSB</span></td><td class="td-dim">0 – 255</td></tr>
+        <tr><td><code>16</code></td><td>Top blind position <span class="pill pill-green">LSB</span></td><td class="td-dim">0 – 255</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h3>Common 16-bit position values</h3>
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr><th>Position</th><th>16-bit value</th><th>MSB (ch N)</th><th>LSB (ch N+1)</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>Fully retracted (0%)</td>      <td><code>0</code></td>      <td><code>0</code></td>   <td><code>0</code></td></tr>
+        <tr><td>25% extended</td>               <td><code>16383</code></td>  <td><code>63</code></td>  <td><code>255</code></td></tr>
+        <tr><td>50% extended</td>               <td><code>32767</code></td>  <td><code>127</code></td> <td><code>255</code></td></tr>
+        <tr><td>75% extended</td>               <td><code>49151</code></td>  <td><code>191</code></td> <td><code>255</code></td></tr>
+        <tr><td>Fully extended (100%)</td>      <td><code>65535</code></td>  <td><code>255</code></td> <td><code>255</code></td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="callout warn">
+    <div class="callout-icon">⚠️</div>
+    <div class="callout-body">
+      <strong>Calibration required before Art-Net responds</strong>
+      The frame firmware ignores Art-Net position commands until the blind has been <em>calibrated</em> (travel range measured) and <em>homed</em> (returned to start position). See Section 4.
+    </div>
+  </div>
+
+  <h3>Patching examples</h3>
+
+  <p><strong>MagicQ / ETC / generic console:</strong> create a generic 16-channel fixture or patch 4 × 4-channel fixtures starting at addresses 1, 5, 9, 13 in Universe 1.</p>
+
+  <p><strong>Resolume Avenue / Arena:</strong></p>
+  <pre><span class="c">// Output → Add Art-Net → Universe 1 → destination 10.0.0.255 (broadcast)
+// Map DMX faders: ch 1-2 = Frame 1 bottom, ch 3-4 = Frame 1 top, etc.</span></pre>
+
+  <p><strong>TouchDesigner:</strong></p>
+  <pre><span class="c"># Art-Net OUT CHOP</span>
+network address  <span class="v">10.0.0.255</span>   <span class="c"># broadcast, or individual IPs</span>
+port             <span class="v">6454</span>
+universe         <span class="v">0</span>            <span class="c"># TD uses 0-indexed: universe 0 = Art-Net universe 1</span>
+<span class="c"># Output channels 1-16 map directly to the DMX channel table above</span></pre>
+
+  <p><strong>QLC+:</strong> Output → Add universe → Art-Net output → IP <code>10.0.0.255</code> port <code>6454</code> universe <code>1</code>.</p>
+
+
+  <!-- ══ OSC ═══════════════════════════════════════════════════════════ -->
+  <h2>3 · OSC Control</h2>
+  <div class="section-label sl-osc">OSC  UDP 7000</div>
+
+  <p>
+    OSC gives direct, human-readable per-frame control. It is ideal for scripted automation, TouchDesigner, QLab, or any software with an OSC output.
+    Each frame listens on its own IP at port <code>7000</code>. Arguments are <strong>floats in the range 0.0 – 1.0</strong> (0.0 = fully retracted, 1.0 = fully extended).
+  </p>
+
+  <h3>Position control endpoints</h3>
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr><th>OSC address</th><th>Argument</th><th>Description</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><code>/btm/pos</code></td>
+          <td><code>float  0.0 – 1.0</code></td>
+          <td>Move bottom blind to position (0.0 = retracted, 1.0 = extended)</td>
+        </tr>
+        <tr>
+          <td><code>/top/pos</code></td>
+          <td><code>float  0.0 – 1.0</code></td>
+          <td>Move top blind to position</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p><strong>Example — move Frame 2 bottom blind to 75%:</strong></p>
+  <pre><span class="c">Send UDP packet to  </span><span class="k">10.0.0.102</span><span class="c">:7000</span>
+OSC address:  <span class="s">/btm/pos</span>
+Argument:     <span class="v">0.75</span>  <span class="c">(float32)</span></pre>
+
+  <h3>Calibration &amp; utility endpoints</h3>
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr><th>OSC address</th><th>Arguments</th><th>Description</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><code>/calibrate</code></td>
+          <td class="td-dim">none</td>
+          <td>Calibrate <strong>both</strong> blinds on the target frame (measures full travel range)</td>
+        </tr>
+        <tr>
+          <td><code>/btm/calibrate</code></td>
+          <td class="td-dim">none</td>
+          <td>Calibrate bottom blind only</td>
+        </tr>
+        <tr>
+          <td><code>/top/calibrate</code></td>
+          <td class="td-dim">none</td>
+          <td>Calibrate top blind only</td>
+        </tr>
+        <tr>
+          <td><code>/status</code></td>
+          <td class="td-dim">none</td>
+          <td>Request a status reply (see below)</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h3>Status reply</h3>
+  <p>
+    When the frame receives <code>/status</code>, it replies <strong>back to your IP:port</strong> with a <code>/status</code> message containing 8 integer arguments:
+  </p>
+
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr><th>Arg #</th><th>Name</th><th>Values</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>0</td><td><code>calibrated_bottom</code></td><td><code>0</code> = not calibrated, <code>1</code> = calibrated</td></tr>
+        <tr><td>1</td><td><code>homed_bottom</code></td>     <td><code>0</code> = not homed, <code>1</code> = homed since power-on</td></tr>
+        <tr><td>2</td><td><code>max_steps_bottom</code></td> <td>Total step count of full travel range</td></tr>
+        <tr><td>3</td><td><code>pos_steps_bottom</code></td> <td>Current position in stepper steps</td></tr>
+        <tr><td>4</td><td><code>calibrated_top</code></td>   <td><code>0</code> / <code>1</code></td></tr>
+        <tr><td>5</td><td><code>homed_top</code></td>        <td><code>0</code> / <code>1</code></td></tr>
+        <tr><td>6</td><td><code>max_steps_top</code></td>    <td>Total step count of full travel range</td></tr>
+        <tr><td>7</td><td><code>pos_steps_top</code></td>    <td>Current position in stepper steps</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p><strong>TouchDesigner — OSC OUT CHOP example:</strong></p>
+  <pre><span class="c"># OSC Out CHOP — Frame 1 bottom blind</span>
+network address  <span class="k">10.0.0.101</span>
+port             <span class="v">7000</span>
+address          <span class="s">/btm/pos</span>
+data type        Float
+<span class="c"># Drive the channel value from 0.0 to 1.0 with a LFO or ramp CHOP</span></pre>
+
+  <p><strong>QLab — OSC cue example:</strong></p>
+  <pre><span class="c"># Patch: target IP 10.0.0.101, port 7000</span>
+OSC address:  <span class="s">/top/pos</span>
+Arguments:    <span class="v">0.5</span></pre>
+
+  <div class="callout info">
+    <div class="callout-icon">ℹ️</div>
+    <div class="callout-body">
+      <strong>Tip — smooth movement via repeated OSC messages</strong>
+      The motor firmware applies its own speed/acceleration limit, so you can jump straight to any target position.
+      For cinematic slow motion, ramp the float value over time in your software (LFO, timeline, or tween).
+    </div>
+  </div>
+
+
+  <!-- ══ CALIBRATION ═══════════════════════════════════════════════════ -->
+  <h2>4 · First-time Calibration</h2>
+  <div class="section-label sl-calib">🔧 Required once after power-on</div>
+
+  <p>
+    The stepper motors have no absolute encoder — the firmware must measure the full travel range before it can accept position commands.
+    This only needs to be done <strong>once per power cycle</strong>; the calibration values are stored in flash memory.
+  </p>
+
+  <h3>Steps</h3>
+  <ol style="margin-left:20px; color:#8b949e; line-height:2;">
+    <li>Power on the frame. Wait ~5 seconds for the ESP32 to boot and connect to the network.</li>
+    <li>Send <code>/calibrate</code> (no arguments) via OSC to the frame's IP on port <code>7000</code>.</li>
+    <li>The blind will travel to the end-stop, then back to home position — this takes ~30 seconds.</li>
+    <li>Once complete, position commands via Art-Net or OSC become active.</li>
+  </ol>
+
+  <div class="callout warn">
+    <div class="callout-icon">⚠️</div>
+    <div class="callout-body">
+      <strong>Do not send position commands during calibration</strong>
+      Any Art-Net or OSC position messages sent while calibration is running are silently ignored.
+      Wait until both <code>calibrated</code> and <code>homed</code> flags in the <code>/status</code> reply are <code>1</code>.
+    </div>
+  </div>
+
+  <h3>Web interface (optional)</h3>
+  <p>Each frame also exposes a built-in web UI for manual control and diagnostics. Open a browser and navigate to the frame's IP address:</p>
+  <pre><span class="c"># Browser address bar</span>
+<span class="k">http://10.0.0.101</span>   <span class="c">← Frame 1</span>
+<span class="k">http://10.0.0.102</span>   <span class="c">← Frame 2</span>
+<span class="k">http://10.0.0.103</span>   <span class="c">← Frame 3</span>
+<span class="k">http://10.0.0.104</span>   <span class="c">← Frame 4</span></pre>
+
+
+  <!-- ══ TROUBLESHOOTING ════════════════════════════════════════════════ -->
+  <h2>5 · Troubleshooting</h2>
+
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr><th>Symptom</th><th>Likely cause</th><th>Fix</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>Frame does not respond to Art-Net or OSC</td>
+          <td>Calibration not done, or frame not reachable</td>
+          <td>Ping the IP; send <code>/calibrate</code> via OSC; check switch LEDs</td>
+        </tr>
+        <tr>
+          <td>Blind moves to 0% or ignores commands</td>
+          <td>DMX bytes out of range, or 16-bit split wrong</td>
+          <td>Verify MSB/LSB order: ch N = high byte, ch N+1 = low byte</td>
+        </tr>
+        <tr>
+          <td>Only one blind moves per frame</td>
+          <td>Incorrect DMX start address</td>
+          <td>Check patch: Frame 1=ch1, Frame 2=ch5, Frame 3=ch9, Frame 4=ch13</td>
+        </tr>
+        <tr>
+          <td>Jerky or stuttering movement</td>
+          <td>Packet loss / Wi-Fi being used</td>
+          <td>Switch to wired Ethernet; check cable &amp; switch</td>
+        </tr>
+        <tr>
+          <td>OSC status reply not received</td>
+          <td>Firewall blocking inbound UDP 7000, or wrong source port</td>
+          <td>Disable host firewall for the 10.0.0.0/24 subnet</td>
+        </tr>
+        <tr>
+          <td>Frame offline after power cycle</td>
+          <td>DHCP lease or IP conflict</td>
+          <td>Frames use static IPs — verify no other device has .101–.104</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+
+  <!-- ══ FOOTER ═════════════════════════════════════════════════════════ -->
+  <div class="footer">
+    Cocktailbar BB · Motorised Blinds Installation · Art-Net + OSC Connection Guide<br>
+    Last updated 2026 · For technical support contact the system operator
+  </div>
+
+</div>
+</body>
+</html>
