@@ -440,17 +440,35 @@ class BlindsApp(tk.Tk):
         c.create_oval(bfx - 18, bfy - 18, bfx + 18, bfy + 18,
                        fill="", outline="", tags=("knob_bpm_fine",))
 
-        bpm_fine_state = {"last_cc": 64}  # start at center (64 = neutral)
+        bpm_fine_state = {"last_cc": None}  # track last CC value to detect direction
 
         def on_bpm_fine_cc(cc_value):
-            """Handle CC 13 input: each +1/-1 from center = ±0.01 BPM"""
-            center = 64
-            delta = cc_value - bpm_fine_state["last_cc"]
+            """Handle CC 13 input: each encoder step = ±0.01 BPM
+            CW = increasing CC values → +0.01 BPM
+            CCW = decreasing CC values → -0.01 BPM"""
+            last = bpm_fine_state["last_cc"]
+
+            if last is None:
+                # First call, just record the value
+                bpm_fine_state["last_cc"] = cc_value
+                return
+
+            # Calculate delta, handling 0-127 wraparound
+            delta = cc_value - last
+            if delta > 64:
+                # Wrapped backwards (e.g., 120 to 5 = -115, adjust to -8)
+                delta -= 128
+            elif delta < -64:
+                # Wrapped forwards (e.g., 5 to 120 = 115, adjust to 8)
+                delta += 128
+
+            # Each step = ±0.01 BPM
             if delta != 0:
                 adjustment = delta * 0.01
                 new_bpm = self._bpm_var.get() + adjustment
                 self._bpm_var.set(round(new_bpm, 2))
-                bpm_fine_state["last_cc"] = cc_value
+
+            bpm_fine_state["last_cc"] = cc_value
 
         self._bpm_fine_handler = on_bpm_fine_cc
 
