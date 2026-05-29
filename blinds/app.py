@@ -1500,7 +1500,7 @@ class BlindsApp(tk.Tk):
         """Beat visualisation on the 8 Device Control knob LED rings + buttons.
         An 8-beat cycle through knobs 0-7. Within each beat:
         - Knob ring: single LED scans clockwise around 15-position ring (1 LED per 1/15th beat)
-        - Button: brightness increases then decreases across the beat (velocity 20→120→20)"""
+        - Button: on/off flash (on for first half of beat, off for second half)"""
         try:
             if self._midi_out is not None:
                 beat          = self._current_raw_beat() + self._beat_offset
@@ -1524,12 +1524,11 @@ class BlindsApp(tk.Tk):
                 self._led_ring(APC_CC_DEVICE_KNOB_BASE + knob_offset,
                                APC_SINGLE_RING_POS[led_pos])
 
-                # Button: brightness pulse (20→120→20 across the beat)
+                # Button: on/off flash (on for first 0.5 of beat, off for second 0.5)
                 btn_note = APC_NOTE_DEVICE_BTN_ALL[beat_in_cycle]
-                # Velocity follows a triangular wave: 0 → 1 → 0
-                vel_triangle = 1.0 - abs(beat_frac * 2.0 - 1.0)  # 0→1→0 from 0→0.5→1
-                btn_vel = int(20 + vel_triangle * 100)  # 20→120→20
-                self._midi_out.send(mido.Message("note_on", note=btn_note, velocity=btn_vel, channel=0))
+                btn_on = beat_frac < 0.5  # on in first half, off in second half
+                msg_type = "note_on" if btn_on else "note_off"
+                self._midi_out.send(mido.Message(msg_type, note=btn_note, velocity=127 if btn_on else 0, channel=0))
         except Exception:
             pass
         self.after(15, self._chase_leds_tick)   # ≈ 67 Hz
