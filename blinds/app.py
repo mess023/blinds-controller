@@ -20,6 +20,7 @@ from .constants import (
     APC_BEAT_VALUES,
     APC_CC_DEVICE_KNOB_BASE, APC_CC_DEVICE_KNOB_RING_BASE,
     APC_BEAT_KNOB_ORDER, APC_SINGLE_RING_POS,
+    APC_NOTE_DEVICE_BTN_ALL,
     APC_BTN_BPM_SYNC, APC_BTN_AUDIO_SYNC, APC_BTN_LINK,
     APC_BTN_RESYNC, APC_BTN_TAP, APC_BTN_NUDGE_MINUS, APC_BTN_NUDGE_PLUS,
     APC_CC_GAP_POS_CH, APC_CC_GAP_POS,
@@ -99,8 +100,8 @@ class BlindsApp(tk.Tk):
         # doesn't make Uniform glow at startup.
         self._size_pat_selected: "str | None" = None
         self._pos_pat_selected:  "str | None" = None
-        # Beat-chase state: which of the 8 TRACK SELECT buttons is currently
-        # lit. None means no LED is lit yet (or MIDI isn't connected).
+        # Beat-chase state: which of the 8 buttons (knobs or device buttons) is
+        # currently lit. None means no LED is lit yet (or MIDI isn't connected).
         self._chase_last_btn: "int | None" = None
 
         # Per-window status from the firmware (updated by the telemetry thread).
@@ -1489,16 +1490,17 @@ class BlindsApp(tk.Tk):
         # Device control knob rings (beat visualiser)
         for i in range(8):
             self._led_ring(APC_CC_DEVICE_KNOB_BASE + i, 0)
+        # Device control buttons (beat visualiser)
+        for btn_note in APC_NOTE_DEVICE_BTN_ALL:
+            self._led_btn(btn_note, False)
         self._chase_last_btn = None
         self._led_ring(APC_CC_GAP_SIZE, 0)
 
     def _chase_leds_tick(self):
-        """Beat visualisation on the 8 Device Control knob LED rings.
-        An 8-beat cycle: upper row first (CC 0x14-0x17), then lower row
-        (CC 0x10-0x13). Within each beat a single LED scans clockwise around
-        the 15-position ring — 1 LED per 1/15th of a beat — then the ring
-        blanks and the next knob starts. Single ring style is used so only one
-        LED is ever lit on the active ring."""
+        """Beat visualisation on the 8 Device Control knob LED rings + buttons.
+        An 8-beat cycle through knobs 0-7. Within each beat:
+        - Knob ring: single LED scans clockwise around 15-position ring (1 LED per 1/15th beat)
+        - Button: brightness increases then decreases across the beat (velocity 20→120→20)"""
         try:
             if self._midi_out is not None:
                 beat          = self._current_raw_beat() + self._beat_offset
@@ -1506,17 +1508,28 @@ class BlindsApp(tk.Tk):
                 knob_offset   = APC_BEAT_KNOB_ORDER[beat_in_cycle]
                 beat_frac     = beat % 1.0
 
-                # When the beat advances, blank the previous ring
+                # When the beat advances, blank the previous ring and button
                 if beat_in_cycle != self._chase_last_btn:
                     if self._chase_last_btn is not None:
                         prev_offset = APC_BEAT_KNOB_ORDER[self._chase_last_btn]
+                        # Clear previous knob ring
                         self._led_ring(APC_CC_DEVICE_KNOB_BASE + prev_offset, 0)
+                        # Turn off previous button
+                        prev_btn_note = APC_NOTE_DEVICE_BTN_ALL[self._chase_last_btn]
+                        self._midi_out.send(mido.Message("note_off", note=prev_btn_note, channel=0))
                     self._chase_last_btn = beat_in_cycle
 
-                # Single style: position 0-14 → one LED clockwise around ring
+                # Knob ring: position 0-14 → one LED clockwise around ring
                 led_pos = min(14, int(beat_frac * 15))
                 self._led_ring(APC_CC_DEVICE_KNOB_BASE + knob_offset,
                                APC_SINGLE_RING_POS[led_pos])
+
+                # Button: brightness pulse (20→120→20 across the beat)
+                btn_note = APC_NOTE_DEVICE_BTN_ALL[beat_in_cycle]
+                # Velocity follows a triangular wave: 0 → 1 → 0
+                vel_triangle = 1.0 - abs(beat_frac * 2.0 - 1.0)  # 0→1→0 from 0→0.5→1
+                btn_vel = int(20 + vel_triangle * 100)  # 20→120→20
+                self._midi_out.send(mido.Message("note_on", note=btn_note, velocity=btn_vel, channel=0))
         except Exception:
             pass
         self.after(15, self._chase_leds_tick)   # ≈ 67 Hz

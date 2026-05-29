@@ -97,9 +97,15 @@ APC_BEAT_VALUES = [1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 64.0, 128.0]
 APC_CC_DEVICE_KNOB_BASE      = 0x10   # 16 — device knob 1 value CC
 APC_CC_DEVICE_KNOB_RING_BASE = 0x18   # 24 — device knob 1 ring-type CC
 
-# Beat-visualiser order: upper row first (knobs 5-8 = offsets 4-7),
-# then lower row (knobs 1-4 = offsets 0-3).
-APC_BEAT_KNOB_ORDER = [4, 5, 6, 7, 0, 1, 2, 3]
+# Beat-visualiser order: upper row first (knobs 1-4 = offsets 0-3),
+# then lower row (knobs 5-8 = offsets 4-7).
+APC_BEAT_KNOB_ORDER = [0, 1, 2, 3, 4, 5, 6, 7]
+
+# Device control buttons below the knobs: 2 rows × 4 buttons.
+# Top row (left to right): notes 64-67, Bottom row: notes 72-75.
+APC_NOTE_DEVICE_BTN_TOP = [64, 65, 66, 67]
+APC_NOTE_DEVICE_BTN_BOT = [72, 73, 74, 75]
+APC_NOTE_DEVICE_BTN_ALL = APC_NOTE_DEVICE_BTN_TOP + APC_NOTE_DEVICE_BTN_BOT
 
 # Single-style ring: 15 cc values, one per LED position (0 = leftmost).
 # Formula: centre of each 127/15-wide bucket.
