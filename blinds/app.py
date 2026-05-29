@@ -150,22 +150,33 @@ class BlindsApp(tk.Tk):
         tk.Label(title_box, text=f"Art-Net unicast  •  Universe {UNIVERSE}",
                  font=("Segoe UI", 9), bg=BG, fg=DIM).pack()
 
-        # APC40 visualisation + mapped clickable controls
-        self._build_apc40_canvas()
+        # ── Three-column layout: Frames (left) | APC40 (center) | Options (right) ──
+        main = tk.Frame(self, bg=BG)
+        main.pack(fill="both", expand=True, padx=12, pady=(6, 0))
 
-        # Everything below the APC40 image is the "config" / unmapped controls
-        _hr(self)
-        self._build_frame_cards()
-        self._build_artnet_controls()
-        _hr(self)
-        self._build_gap_section()
-        _hr(self)
-        self._build_bpm_section()
-        _hr(self)
-        self._build_audio_section()
-        tk.Frame(self, bg=BG, height=14).pack()
+        # Left column: Frame cards (vertical stack)
+        self._build_frame_cards_vertical(parent=main)
+
+        # Center column: APC40 visualisation + mapped clickable controls
+        self._build_apc40_canvas(parent=main)
+
+        # Right column: Everything else (config controls)
+        right_col = tk.Frame(main, bg=BG)
+        right_col.pack(side="right", fill="both", expand=True, padx=(8, 0))
+
+        _hr(right_col)
+        self._build_artnet_controls(parent=right_col)
+        _hr(right_col)
+        self._build_gap_section(parent=right_col)
+        _hr(right_col)
+        self._build_bpm_section(parent=right_col)
+        _hr(right_col)
+        self._build_audio_section(parent=right_col)
+        tk.Frame(right_col, bg=BG, height=14).pack()
+
         # Constrain window so the APC40 canvas always shows fully.
-        self.minsize(APC40_W + 40, 640)
+        # Width: frames (220) + apc40 (1100) + options (400) + margins = ~1800px
+        self.minsize(1800, 800)
 
     # ── APC40 image canvas with overlaid mapped controls ─────────────────────
     # All overlays are CANVAS ITEMS, not widgets — so no opaque button face
@@ -181,14 +192,16 @@ class BlindsApp(tk.Tk):
     APC_LABEL_PRINTED = "#ffffff"   # white — matches the APC40's printed
                                     # "TAP TEMPO" / "NUDGE +/-" labels
 
-    def _build_apc40_canvas(self):
+    def _build_apc40_canvas(self, parent=None):
         """APC40 image as background with click-only TEXT overlays at the
         positions of each MIDI-mapped control. Same state the MIDI handler
         toggles, so clicks here and hardware presses stay in sync."""
+        if parent is None:
+            parent = self
         try:
             from PIL import Image, ImageTk
         except ImportError:
-            tk.Label(self, text="(install Pillow to enable the APC40 image: pip install Pillow)",
+            tk.Label(parent, text="(install Pillow to enable the APC40 image: pip install Pillow)",
                      bg=BG, fg=RED, font=("Segoe UI", 9)).pack(pady=6)
             return
         _img: Any = Image   # Pillow ≥10 hides LANCZOS under .Resampling
@@ -196,14 +209,14 @@ class BlindsApp(tk.Tk):
         try:
             pil = Image.open(APC40_IMG_PATH).resize((APC40_W, APC40_H), lanczos)
         except FileNotFoundError:
-            tk.Label(self, text=f"(APC40 image not found: {APC40_IMG_PATH})",
+            tk.Label(parent, text=f"(APC40 image not found: {APC40_IMG_PATH})",
                      bg=BG, fg=RED, font=("Segoe UI", 9)).pack(pady=6)
             return
 
         self._apc40_tkimg = ImageTk.PhotoImage(pil)   # MUST keep reference
 
-        wrap = tk.Frame(self, bg=BG)
-        wrap.pack(pady=(6, 0))
+        wrap = tk.Frame(parent, bg=BG)
+        wrap.pack(side="left", pady=(6, 0))
         c = tk.Canvas(wrap, width=APC40_W, height=APC40_H,
                       bg=BG, highlightthickness=0, bd=0)
         c.pack()
@@ -479,17 +492,32 @@ class BlindsApp(tk.Tk):
              self._audio_det is not None and self._audio_det.running)
         tint(self._apc_master_btns["link"],        self._link_on.get())
 
-    # ── Frame cards ──────────────────────────────────────────────────────────
+    # ── Frame cards (vertical stack on left) ─────────────────────────────────
 
-    def _build_frame_cards(self):
-        row = tk.Frame(self, bg=BG)
+    def _build_frame_cards_vertical(self, parent=None):
+        """Stack frame cards vertically on the left side."""
+        if parent is None:
+            parent = self
+        col = tk.Frame(parent, bg=BG)
+        col.pack(side="left", fill="y", padx=(0, 8))
+        for row_idx, cfg in enumerate(FRAMES):
+            self._frame_card(col, row_idx, cfg, layout="vertical")
+
+    def _build_frame_cards(self, parent=None):
+        """Legacy horizontal layout (kept for backward compatibility)."""
+        if parent is None:
+            parent = self
+        row = tk.Frame(parent, bg=BG)
         row.pack(padx=16)
         for col, cfg in enumerate(FRAMES):
-            self._frame_card(row, col, cfg)
+            self._frame_card(row, col, cfg, layout="horizontal")
 
-    def _frame_card(self, parent, col, cfg):
-        card = tk.Frame(parent, bg=CARD, padx=14, pady=12)
-        card.grid(row=0, column=col, padx=5)
+    def _frame_card(self, parent, idx, cfg, layout="horizontal"):
+        card = tk.Frame(parent, bg=CARD, padx=12, pady=10, width=200)
+        if layout == "horizontal":
+            card.grid(row=0, column=idx, padx=5)
+        else:  # vertical
+            card.pack(fill="x", pady=4)
 
         tk.Label(card, text=cfg["name"],
                  font=("Segoe UI", 10, "bold"), bg=CARD, fg=BLUE).pack()
@@ -531,8 +559,10 @@ class BlindsApp(tk.Tk):
 
     # ── Art-Net controls ─────────────────────────────────────────────────────
 
-    def _build_artnet_controls(self):
-        row = tk.Frame(self, bg=BG)
+    def _build_artnet_controls(self, parent=None):
+        if parent is None:
+            parent = self
+        row = tk.Frame(parent, bg=BG)
         row.pack(padx=16, pady=(0, 4), fill="x")
 
         self._artnet_status = tk.Label(row, text="Unicast to individual IPs",
@@ -674,18 +704,22 @@ class BlindsApp(tk.Tk):
 
     # ── Gap control ──────────────────────────────────────────────────────────
 
-    def _build_gap_section(self):
+    def _build_gap_section(self, parent=None):
+        if parent is None:
+            parent = self
         self._param_block(
+            parent=parent,
             title="GAP POSITION   (0 % = bottom  •  100 % = top)",
             var=self._gap_pos_var, vmax=100, unit="%",
             presets=[("Bottom", 0), ("Centre", 50), ("Top", 100)],
             sync_attr="_pos_sync_btns",  set_sync_fn=self._set_pos_sync,
             pat_attr="_pos_pbts",        set_pat_fn=self._set_pos_pattern)
 
-        _hr(self)
+        _hr(parent)
 
         # Gap Size is a small % of the (tall) window — only a few % is useful.
         self._param_block(
+            parent=parent,
             title="GAP SIZE   (% of window the band opens)",
             var=self._gap_size_var, vmax=25, unit="%",
             presets=[("Closed", 0), ("2%", 2), ("5%", 5),
@@ -694,7 +728,7 @@ class BlindsApp(tk.Tk):
             pat_attr="_size_pbts",       set_pat_fn=self._set_size_pattern)
 
         # Closed-overlap fine-tune + a full-open park button
-        ov = tk.Frame(self, bg=BG)
+        ov = tk.Frame(parent, bg=BG)
         ov.pack(padx=20, pady=(2, 4), fill="x")
         tk.Label(ov, text="Overlap:", font=("Segoe UI", 9),
                  bg=BG, fg=FG, width=8, anchor="w").pack(side="left")
@@ -719,10 +753,12 @@ class BlindsApp(tk.Tk):
                 None if self._bpm_on.get() else self._push_from_gap_controls()))
 
     def _param_block(self, title, var, vmax, unit, presets,
-                     sync_attr, set_sync_fn, pat_attr, set_pat_fn):
+                     sync_attr, set_sync_fn, pat_attr, set_pat_fn, parent=None):
         """One self-contained block: value slider (0..vmax, labelled with `unit`)
         + presets, beat-sync selector, and an independent pattern selector."""
-        sec = tk.Frame(self, bg=BG)
+        if parent is None:
+            parent = self
+        sec = tk.Frame(parent, bg=BG)
         sec.pack(padx=20, pady=(4, 4), fill="x")
 
         tk.Label(sec, text=title, font=("Segoe UI", 10, "bold"),
@@ -782,8 +818,10 @@ class BlindsApp(tk.Tk):
 
     # ── BPM section ──────────────────────────────────────────────────────────
 
-    def _build_bpm_section(self):
-        sec = tk.Frame(self, bg=BG)
+    def _build_bpm_section(self, parent=None):
+        if parent is None:
+            parent = self
+        sec = tk.Frame(parent, bg=BG)
         sec.pack(padx=20, pady=(4, 0), fill="x")
 
         # Header row
@@ -1090,8 +1128,10 @@ class BlindsApp(tk.Tk):
 
     # ── Audio BPM section ────────────────────────────────────────────────────
 
-    def _build_audio_section(self):
-        sec = tk.Frame(self, bg=BG)
+    def _build_audio_section(self, parent=None):
+        if parent is None:
+            parent = self
+        sec = tk.Frame(parent, bg=BG)
         sec.pack(padx=20, pady=(4, 0), fill="x")
 
         # Header
