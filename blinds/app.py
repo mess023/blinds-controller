@@ -521,11 +521,11 @@ class BlindsApp(tk.Tk):
 
         tk.Label(card, text=cfg["name"],
                  font=("Segoe UI", 10, "bold"), bg=CARD, fg=BLUE).pack()
-        tk.Entry(card, textvariable=self._ip_vars[col],
+        tk.Entry(card, textvariable=self._ip_vars[idx],
                  font=("Segoe UI", 8), bg=BTN, fg=FG,
                  insertbackground=FG, relief="flat", width=15).pack(pady=(0, 8))
 
-        pv   = self._pvars[col]
+        pv   = self._pvars[idx]
         lbls = {}
         for key, text in (("b", "Bottom"), ("t", "Top")):
             r = tk.Frame(card, bg=CARD)
@@ -539,8 +539,8 @@ class BlindsApp(tk.Tk):
             lbl.pack(side="left")
             lbls[key] = lbl
 
-            def _on_write(*_, idx=col, k=key):
-                self._refresh_lbl(idx, k)
+            def _on_write(*_, frame_idx=idx, k=key):
+                self._refresh_lbl(frame_idx, k)
                 if not self._bpm_on.get():
                     self._send_frame()
 
@@ -551,7 +551,7 @@ class BlindsApp(tk.Tk):
         # Calibration trigger + live status (steps) for this window
         tk.Button(card, text="Calibrate window", font=("Segoe UI", 8),
                   bg=BTN, fg=BTNFG, relief="flat", padx=8, pady=4, cursor="hand2",
-                  command=lambda i=col: self._calibrate_window(i)).pack(pady=(8, 2))
+                  command=lambda i=idx: self._calibrate_window(i)).pack(pady=(8, 2))
         stat = tk.Label(card, text="status: —", font=("Consolas", 8),
                         bg=CARD, fg=DIM, justify="left", anchor="w")
         stat.pack(fill="x")
