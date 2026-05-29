@@ -128,6 +128,7 @@ APC_CC_MOTOR_SPD_CH  = 0    # master fader (CC 0x0E = 14, channel 0)
 APC_CC_MOTOR_SPD     = 14   # CC 14 (Master Fader)  → motor speed 5–100 %/s
 APC_CC_GAP_SIZE_CH   = 0    # top-left device knob (Track Knob 1)
 APC_CC_GAP_SIZE      = 48   # CC 48  → gap size 0–25 %
+APC_CC_BPM_FINE      = 13   # CC 13  → fine BPM adjust (±0.01 per encoder click)
 
 # ── APC40 canvas layout (image background + overlaid widgets) ────────────────
 # Pixel positions are measured on the EMPTY image after rescaling to APC40_W×H.
@@ -161,6 +162,8 @@ APC40_POS = {
     "fader_master": (801, 520, 63, 188),
     # Gap Size knob (top-left of the 8 top knobs)
     "knob_gap_size": (52, 54),           # x, y centre — radius ~22
+    # BPM fine adjust knob (right of NUDGE/TAP TEMPO buttons)
+    "knob_bpm_fine": (1140, 178),        # x, y centre — radius ~18
     # BPM display — above the master button cluster
     "bpm_display": (1028, 50),
 }

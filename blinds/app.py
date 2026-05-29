@@ -26,6 +26,7 @@ from .constants import (
     APC_CC_GAP_POS_CH, APC_CC_GAP_POS,
     APC_CC_MOTOR_SPD_CH, APC_CC_MOTOR_SPD,
     APC_CC_GAP_SIZE_CH, APC_CC_GAP_SIZE,
+    APC_CC_BPM_FINE,
     APC40_W, APC40_H, APC40_IMG_PATH, APC40_POS,
     BG, CARD, FG, DIM, BLUE, GREEN, RED, YELLOW,
     BTN, BTNHOV, BTNSEL, BTNFG, BTNSELFG,
@@ -429,6 +430,29 @@ class BlindsApp(tk.Tk):
         self._gap_size_var.trace_add("write", lambda *_: c.itemconfig(
             self._apc_gap_size_text,
             text=f"{self._gap_size_var.get():.1f}%"))
+
+        # ── BPM fine adjust knob (±0.01 per encoder click) ──────────────────
+        bfx, bfy = APC40_POS["knob_bpm_fine"]
+        self._apc_bpm_fine_text = c.create_text(
+            bfx, bfy, text="◇",
+            fill=self.APC_BPM_FG, font=("Segoe UI", 16, "bold"),
+            anchor="center", tags=("knob_bpm_fine",))
+        c.create_oval(bfx - 18, bfy - 18, bfx + 18, bfy + 18,
+                       fill="", outline="", tags=("knob_bpm_fine",))
+
+        bpm_fine_state = {"last_cc": 64}  # start at center (64 = neutral)
+
+        def on_bpm_fine_cc(cc_value):
+            """Handle CC 13 input: each +1/-1 from center = ±0.01 BPM"""
+            center = 64
+            delta = cc_value - bpm_fine_state["last_cc"]
+            if delta != 0:
+                adjustment = delta * 0.01
+                new_bpm = self._bpm_var.get() + adjustment
+                self._bpm_var.set(round(new_bpm, 2))
+                bpm_fine_state["last_cc"] = cc_value
+
+        self._bpm_fine_handler = on_bpm_fine_cc
 
         # ── Current BPM display (canvas text — fully transparent) ───────────
         bx, by = APC40_POS["bpm_display"]
@@ -1662,6 +1686,9 @@ class BlindsApp(tk.Tk):
             elif ch == APC_CC_GAP_SIZE_CH and msg.control == APC_CC_GAP_SIZE:
                 v = msg.value / 127.0 * 25.0
                 self.after(0, lambda x=v: self._gap_size_var.set(round(x, 2)))
+            elif msg.control == APC_CC_BPM_FINE:
+                # Fine BPM adjust: ±0.01 BPM per encoder click
+                self.after(0, lambda val=msg.value: self._bpm_fine_handler(val))
 
     # ── Ableton Link polling (main thread, every second) ──────────────────────
 
