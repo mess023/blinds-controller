@@ -102,10 +102,9 @@ APC_CC_DEVICE_KNOB_RING_BASE = 0x18   # 24 — device knob 1 ring-type CC
 APC_BEAT_KNOB_ORDER = [0, 1, 2, 3, 4, 5, 6, 7]
 
 # Device control buttons below the knobs: 2 rows × 4 buttons.
-# Top row (left to right): A#2, B2, C3, C#3 (notes 34-37)
-# Bottom row (left to right): D3, D#3, E3, F3 (notes 38-41)
-APC_NOTE_DEVICE_BTN_TOP = [34, 35, 36, 37]  # A#2, B2, C3, C#3
-APC_NOTE_DEVICE_BTN_BOT = [38, 39, 40, 41]  # D3, D#3, E3, F3
+# Top row (left to right): notes 64-67, Bottom row: notes 72-75.
+APC_NOTE_DEVICE_BTN_TOP = [64, 65, 66, 67]
+APC_NOTE_DEVICE_BTN_BOT = [72, 73, 74, 75]
 APC_NOTE_DEVICE_BTN_ALL = APC_NOTE_DEVICE_BTN_TOP + APC_NOTE_DEVICE_BTN_BOT
 
 # Single-style ring: 15 cc values, one per LED position (0 = leftmost).
