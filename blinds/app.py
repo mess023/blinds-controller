@@ -126,8 +126,8 @@ class BlindsApp(tk.Tk):
         threading.Thread(target=self._anim_loop, daemon=True).start()
         threading.Thread(target=self._telemetry_loop, daemon=True).start()
         self._heartbeat()
-        self._poll_link()
         self._chase_leds_tick()
+        self.after(0, self._poll_link)        # schedule after UI is fully laid out
         self.after(300, self._refresh_status_labels)
         self.after(120, self._draw_preview)   # first draw after layout
         self.protocol("WM_DELETE_WINDOW", self._on_close)
