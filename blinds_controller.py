@@ -10,6 +10,9 @@ Run:
 import logging
 import os
 
+# NumPy alias shim for madmom 0.16.1 lives in blinds/__init__.py — importing
+# anything from the blinds package fires it before any submodule that needs it.
+
 logging.basicConfig(
     level=logging.DEBUG,
     format="%(asctime)s  %(levelname)-8s  %(message)s",
