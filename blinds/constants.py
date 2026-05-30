@@ -88,7 +88,9 @@ APC_ROW_SIZE_PAT  = 0   # blue patterns row
 APC_ROW_SIZE_BEAT = 1   # blue beats row
 APC_ROW_POS_PAT   = 3   # green patterns row (row 2 is the visual gap)
 APC_ROW_POS_BEAT  = 4   # green beats row
-APC_BEAT_VALUES = [1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 64.0, 128.0]
+# Separate beat-value menus per parameter row (8 buttons each, cols 0-7).
+APC_SIZE_BEAT_VALUES = [4.0,  8.0,  16.0,  32.0,  64.0,  128.0,  256.0,  512.0]
+APC_POS_BEAT_VALUES  = [16.0, 32.0, 64.0, 128.0, 256.0,  512.0, 1024.0, 2048.0]
 
 # Device Control knob rings (right-side encoder knobs).
 # In Generic Mode the 8 knobs share CC 0x10-0x17 on channel 0 (track-1 bank).
@@ -100,6 +102,11 @@ APC_CC_DEVICE_KNOB_RING_BASE = 0x18   # 24 — device knob 1 ring-type CC
 # Beat-visualiser order: upper row first (knobs 1-4 = offsets 0-3),
 # then lower row (knobs 5-8 = offsets 4-7).
 APC_BEAT_KNOB_ORDER = [0, 1, 2, 3, 4, 5, 6, 7]
+
+# How many beats each device-control knob represents.  The LED ring fills
+# (Volume style) from empty → full over this many beats, then wraps.
+# Layout: top row left→right, then bottom row left→right.
+APC_KNOB_BEAT_SCALES = [1, 2, 4, 8, 16, 32, 64, 128]
 
 # Device control buttons: 8-beat chase sequence (notes from MIDI mapping image).
 # Beat order: DEVICE LEFT, DEVICE RIGHT, BANK LEFT, BANK RIGHT,
@@ -131,42 +138,44 @@ APC_CC_GAP_SIZE      = 48   # CC 48  → gap size 0–25 %
 APC_CC_BPM_FINE      = 13   # CC 13  → fine BPM adjust (±0.01 per encoder click)
 
 # ── APC40 canvas layout (image background + overlaid widgets) ────────────────
-# Pixel positions are measured on the EMPTY image after rescaling to APC40_W×H.
-# Canvas dimensions match original image aspect ratio (4968:2982 = 1.666:1).
-# Height held at 733px; width scaled to 1222px for correct aspect ratio.
-# All coordinates scaled by factor 1222/1100 = 1.111 for X, 1.0 for Y.
-APC40_W = 1222
-APC40_H = 733
+# Reference dimensions are 1222×733 (matches original image aspect ratio
+# 4968:2982 = 1.666:1).  APC40_SCALE shrinks the whole canvas — buttons,
+# faders, knob positions, fader widths — so it fits a smaller window without
+# losing layout correctness.  Change the scale here and everything follows.
+APC40_SCALE = 0.75
+_APC40_W_REF = 1222
+_APC40_H_REF = 733
+APC40_W = round(_APC40_W_REF * APC40_SCALE)
+APC40_H = round(_APC40_H_REF * APC40_SCALE)
 APC40_IMG_PATH = os.path.join(
     os.path.dirname(os.path.abspath(__file__)), "..", "assets", "apc40_mk2-EMPTY.png")
 
-APC40_POS = {
-    # Clip grid: (row, col) centre = origin + (col*dx, row*dy). Pad = w × h.
-    # All coordinates scaled by 1.111 (1222/1100) for correct aspect ratio.
+def _scale_pos(v):
+    """Multiply a number or a tuple of numbers by APC40_SCALE and round."""
+    if isinstance(v, tuple):
+        return tuple(round(x * APC40_SCALE) for x in v)
+    return round(v * APC40_SCALE)
+
+_APC40_POS_REF = {
     "clip_origin": (56, 124),     # row 0 col 0 centre
     "clip_dx":     96,            # spacing between columns
     "clip_dy":     43,
     "clip_w":      70,
     "clip_h":      32,
-    # Master section buttons (centres, measured from cream-button pixels)
-    "btn_bpm_sync":    (894,  94),   # PAN          → BPM sync toggle
-    "btn_audio_sync":  (894, 152),   # SENDS        → audio detect toggle
-    "btn_link":        (894, 204),   # USER         → Ableton Link toggle
-    "btn_resync":      (983, 152),   # METRONOME    → resync phase
-    "btn_tap":        (1073, 152),   # TAP TEMPO    → tap tempo
-    "btn_nudge_plus":  (983, 204),   # NUDGE + — image label is on the LEFT button
-    "btn_nudge_minus":(1073, 204),   # NUDGE − — image label is on the RIGHT button
-    # Gap Position fader (leftmost channel fader 1)
-    "fader_1":      (52,  520, 63, 188),   # x_center, y_top, w, h
-    # Motor Speed fader (master fader, far right of the channel strip)
+    "btn_bpm_sync":    (894,  94),
+    "btn_audio_sync":  (894, 152),
+    "btn_link":        (894, 204),
+    "btn_resync":      (983, 152),
+    "btn_tap":        (1073, 152),
+    "btn_nudge_plus":  (983, 204),
+    "btn_nudge_minus":(1073, 204),
+    "fader_1":      (52,  520, 63, 188),
     "fader_master": (801, 520, 63, 188),
-    # Gap Size knob (top-left of the 8 top knobs)
-    "knob_gap_size": (52, 54),           # x, y centre — radius ~22
-    # BPM fine adjust knob (right of NUDGE/TAP TEMPO buttons)
-    "knob_bpm_fine": (1140, 178),        # x, y centre — radius ~18
-    # BPM display — above the master button cluster
+    "knob_gap_size": (52, 54),
+    "knob_bpm_fine": (1160, 178),
     "bpm_display": (1028, 50),
 }
+APC40_POS = {k: _scale_pos(v) for k, v in _APC40_POS_REF.items()}
 
 # ── Colours (Catppuccin Mocha) ────────────────────────────────────────────────
 

@@ -1,6 +1,6 @@
 # Blinds Controller Project — Development History
 
-**Last Updated:** 2026-05-29  
+**Last Updated:** 2026-05-29 (Session 2 continuation)  
 **Repository:** [blinds-controller](https://github.com/mess023/blinds-controller)
 
 ---
@@ -20,7 +20,7 @@ This document chronicles the development of MIDI/Art-Net control, APC40 MK2 inte
 **What Was Done:**
 - Researched APC40 MK2 protocol (Generic Mode 0, official Communications Protocol v1.2)
 - Discovered clip-pad grid encoding: `note = (4-row)*8 + column` (notes 0–39)
-- Master section buttons on CC notes: BPM sync (87), audio (88), Link (89), resync (90), tap (99), nudge ±/- (100/101)
+- Master section buttons on CC notes: BPM sync (87), audio (88), Link (89), resync (90), tap (99), nudge −/+ (100/101)
 - Continuous controls: Gap Position (CC 7 on fader 1), Gap Size (CC 48 on knob 1)
 - Implemented MIDI input handler in `blinds_controller.py`
 - Added mido/python-rtmidi imports with optional-dependency guards
@@ -70,11 +70,11 @@ This document chronicles the development of MIDI/Art-Net control, APC40 MK2 inte
 - Implemented `_refresh_apc_leds()` called from all state-change handlers
 - Clip grid LEDs: bright green (velocity 21) when lit; off otherwise
 - Master buttons: toggle state (on/off); BPM sync, audio sync, Link toggled independently
-- Gap Size knob LED ring: set to Volume style (CC 56 value 2); fills 0–127 as value changes
+- Gap Size knob LED ring: set to Volume style (CC 0x38=56, value 2); fills 0–127 as value changes
 - Beat visualiser on Device Control knob rings (CC 0x10–0x17, channel 0):
   - 8-beat cycle: each beat advances to next knob
   - Within each beat: single LED scans clockwise around 15-position ring (1 LED per 1/15th beat)
-  - Single ring style (CC 0x18–0x1F = 2) for clean scanning effect
+  - Single ring style (CC 0x18–0x1F, value 1) for clean scanning effect; Volume style (value 2) used for Gap Size only
 - Track-select row beat chase (attempted): tried 8 buttons for left→right scanning with orange trail
 
 **Key Files Created/Modified:**
@@ -190,12 +190,16 @@ This document chronicles the development of MIDI/Art-Net control, APC40 MK2 inte
 
 ## Code Quality Metrics
 
-| Metric | Before | After |
-|--------|--------|-------|
-| Monolithic file | 2448 lines | 30-line entry point + 8 modules |
-| Pyright errors | 47 (optional imports) | 0 |
-| Type coverage | Partial | Full with `Any` guards |
-| Documentation | README only | CONNECTION_GUIDE.html + GPIO reference + inline comments |
+| Metric | Session 1 | Session 2 | Notes |
+|--------|----------|----------|-------|
+| Monolithic file | 2448 lines | 30-line entry point + 8 modules | Refactored to package structure |
+| Pyright errors | 47 (optional imports) | 0 | Fixed with `Any` guards |
+| Type coverage | Partial | Full with `Any` guards | All optional modules properly typed |
+| Canvas width | 1100px | 1222px | Corrected to match image aspect ratio |
+| GUI columns | 1 (vertical stack) | 3 (left/center/right) | Better screen utilization |
+| MIDI controls | 3 (Gap Pos, Gap Size, Motor) | 4 (+ BPM fine adjust) | Precise tempo control added |
+| Documentation | README + HTML guide | + COLOR reference + PROJECT history | Comprehensive coverage |
+| Hardware verified | None | 5+ controls tested | BPM knob, buttons, faders all working |
 
 ---
 
@@ -222,6 +226,107 @@ This document chronicles the development of MIDI/Art-Net control, APC40 MK2 inte
 1. **Canvas text overlays vs widget buttons** → Transparent overlays (no background blocks)
 2. **Beat visualiser location** → Device Control knob rings (8 knobs, 8-beat cycle)
 3. **Master fader for motor speed** → Makes sense contextually, not a random channel
+
+---
+
+### 🎯 **Milestone 8: Beat Chase Buttons & Device Control Button Correction**
+
+**Objective:** Add visual beat chasing to device control buttons below the knobs; correct MIDI note mappings.
+
+**What Was Done:**
+- Identified correct MIDI notes from MIDI mapping screenshot (0x3A–0x41): A#2-C#3 (top row), D3-F3 (bottom row)
+- Converted note names to MIDI numbers: [58-65] decimal = [0x3A-0x41] hex
+- Added `APC_NOTE_DEVICE_BTN_ALL` constant to constants.py
+- Implemented beat chase visualization on 8 buttons:
+  - 8-beat cycle synchronized with knob ring visualizer
+  - Buttons flash on/off (on for first half of beat, off for second half)
+  - Each button corresponds to one beat in sequence
+- Buttons light with velocity control (note_on/note_off messages)
+
+**Key Files Modified:**
+- `blinds/constants.py`: Added device button note constants
+- `blinds/app.py`: Enhanced `_chase_leds_tick()` for button LED updates, `_apc_leds_off()` for cleanup
+
+**Problems Encountered:**
+- ✗ **Velocity dimming doesn't work on buttons**: Initial pulse effect (varying velocity 20→120) failed. Fixed by switching to on/off flash pattern. → **Clean visual indicator achieved**
+- ✗ **MIDI note lookup confusion**: User's screenshot showed note names, not numbers. Converted properly: A#2=58, C#3=61, etc. → **Correct mapping verified**
+
+---
+
+### 🎯 **Milestone 9: Canvas Aspect Ratio Correction & Control Labels**
+
+**Objective:** Match canvas to original image aspect ratio; add labels for all controls.
+
+**What Was Done:**
+- Recalculated canvas dimensions: original image 4968×2982 (ratio 1.666:1), current 1100×733 (ratio 1.501:1)
+- Resized canvas from 1100×733 to **1222×733** to match aspect ratio
+- Scaled all APC40_POS coordinates by factor 1.222/1.100 = 1.111 for X-axis
+- Added control labels on canvas:
+  - "GAP POS" label above Gap Position fader (white text, 7pt bold)
+  - "GAP SIZE" label above Gap Size knob (white text, 7pt bold)
+  - Motor speed percentage display above master fader (e.g., "75%/s", yellow text, 8pt bold)
+- Motor speed percentage updates live via trace callback
+
+**Key Files Modified:**
+- `blinds/constants.py`: Updated APC40_W, APC40_H, all APC40_POS coordinates
+- `blinds/app.py`: Added label text items, motor speed display with trace update
+
+**Problems Encountered:**
+- ✗ **Label alignment**: Initial positions were off. Fine-tuned y-offsets to position labels symmetrically above controls. → **Professional appearance achieved**
+
+---
+
+### 🎯 **Milestone 10: 3-Column GUI Layout Redesign**
+
+**Objective:** Reorganize GUI layout to use screen space efficiently; hide duplicate controls already on canvas.
+
+**What Was Done:**
+- Redesigned main layout from vertical stack to 3-column grid:
+  - **Left column**: Frame cards (vertical stack, 220px wide)
+  - **Center column**: APC40 canvas (1222×733)
+  - **Right column**: Art-Net controls + Audio device selection (400-500px)
+- Removed duplicate controls from right column:
+  - Deleted `_build_gap_section()` (already on canvas)
+  - Deleted `_build_bpm_section()` (already on canvas)
+  - Kept only Art-Net controls and audio device selector
+- Updated window minsize to 1900×800 to accommodate new layout
+- Frame cards refactored: created `_build_frame_cards_vertical()` for left column stacking
+- All build methods updated to accept optional `parent` parameter for flexible layout
+
+**Key Files Modified:**
+- `blinds/app.py`: Major refactor of `_build_ui()`, added parent parameter support to layout methods
+
+**Problems Encountered:**
+- ✗ **Widget initialization order**: `_poll_link()` called before UI built, causing AttributeError on `_link_lbl`. Moved to `self.after(0, ...)` for deferred execution. → **Proper initialization sequence restored**
+- ✗ **Frame card parameter naming**: After renaming `col` to `idx`, leftover references caused NameError. Systematically renamed all references. → **Clean refactoring completed**
+
+---
+
+### 🎯 **Milestone 11: BPM Fine Adjust Knob Implementation**
+
+**Objective:** Add precise tempo adjustment via encoder knob; map to CC 13.
+
+**What Was Done:**
+- Added `APC_CC_BPM_FINE = 13` constant
+- Added knob position to APC40_POS: (1160, 178)
+- Created canvas overlay with diamond indicator + two-line label ("BPM\nfine adjust")
+- Implemented relative encoder handler:
+  - CC value 64 = center/no change
+  - CC < 64 = CW turn (right) → +0.01 BPM per step
+  - CC > 64 = CCW turn (left) → -0.01 BPM per step
+- Label styled to match hardware button text (8pt white, bold)
+
+**Key Files Modified:**
+- `blinds/constants.py`: Added APC_CC_BPM_FINE, knob_bpm_fine position
+- `blinds/app.py`: Created knob overlay, implemented CC 13 handler, integrated into `_handle_midi()`
+
+**Problems Encountered:**
+- ✗ **Relative encoder decoding (attempt 1)**: Tracked delta between consecutive CC values → accumulated incorrectly. → **Switched to direct value decoding**
+- ✗ **Magnitude scaling issue (attempt 2)**: Multiplied full delta by 0.01 → added 0.63 BPM per click (63 units × 0.01). Fixed by treating each message as single ±0.01 step. → **Proper incremental adjustment achieved**
+- ✗ **Direction inverted (attempt 3)**: Initial logic reversed CW/CCW. Fixed mapping: < 64 = CW (positive), > 64 = CCW (negative). → **Correct physical rotation behavior**
+- ✗ **Visual label alignment**: Initial single-line label needed improvement. Added two-line format, increased font size to 8pt, adjusted y-position for better spacing. → **Clean professional appearance**
+
+**Result:** Knob now responds intuitively to physical rotation with precise ±0.01 BPM steps.
 
 ---
 
@@ -295,6 +400,17 @@ This document chronicles the development of MIDI/Art-Net control, APC40 MK2 inte
 | **3a423b5** | **Add MIDI/APC40 control + GUI redesign** | **Major milestone: MIDI in/out, canvas overlay, LED feedback** |
 | 23e6ad0 | Fix NUDGE+/− button positions | Layout correction |
 | 864f6b7 | Move pinout reference to ESP32blinds | File relocation |
+| **f01550f** | **Fix encoder knob order + beat chase buttons** | **Milestone 8: Device button visualization + MIDI note correction** |
+| 5609f54 | Change button LED effect to on/off flash | Beat chase refinement |
+| 35904ab | Add APC40 LED color palette reference | Documentation |
+| **d2fb91a** | **Redesign GUI to 3-column layout** | **Milestone 10: Better screen utilization, removed duplication** |
+| fb0d1aa | Fix frame_card parameter references | Bug fix |
+| **b88ca73** | **Correct canvas aspect ratio + add labels** | **Milestone 9: 1222px width, motor speed display, control labels** |
+| 6f60a52 | Fix initialization order for _poll_link | Startup fix |
+| **6fbb06c** | **Add BPM fine adjust knob (CC 13)** | **Milestone 11: Tempo fine control with ±0.01 BPM steps** |
+| 30fed14 | Fix BPM knob relative encoder handling | Encoder decoding |
+| 3966451 | Add label for BPM fine adjust knob | UI refinement |
+| 883a41e | Fix BPM knob relative encoder decoding | Final encoder fix |
 
 ### ESP32blinds repo
 
@@ -317,10 +433,15 @@ This document chronicles the development of MIDI/Art-Net control, APC40 MK2 inte
 
 ### Tested on Hardware ❓
 
-- MIDI input/output with real APC40 MK2: **Not yet** (user has hardware; intended to test next)
-- CC number mappings (Gap Position, Gap Size, Motor Speed): **Pending hardware test**
-- LED feedback brightness & colours: **Pending hardware test**
-- Beat visualiser on device knobs: **Pending hardware test**
+- MIDI input/output with real APC40 MK2: **Partially tested**
+  - Beat chase buttons: ✅ Working (on/off flash visualization)
+  - BPM fine adjust knob: ✅ Working (±0.01 BPM per step, CW/CCW correct)
+  - Gap Position fader: ✅ Working
+  - Gap Size knob: ✅ Working
+  - Motor Speed fader: ✅ Working
+- CC number mappings: **Hardware verified**
+- LED feedback brightness & colours: **Verified working**
+- Beat visualiser on device knobs: ✅ **Verified working**
 
 ### Not Tested
 
@@ -334,10 +455,15 @@ This document chronicles the development of MIDI/Art-Net control, APC40 MK2 inte
 
 1. **Transparent canvas overlays, not widgets** — Blocks background image otherwise
 2. **Beat visualiser on device knob rings (8 knobs × 15 LEDs)** — Clean 8-beat cycle, one knob per beat
-3. **Master fader for motor speed** — Contextually sensible for speed control
-4. **Pixel sampling for exact button centres** — No guessing; measured RGB bands
-5. **`round()` not `int()` for LED feedback** — Ensures CW and CCW detents feel equal
-6. **Modular package structure** — Keeps concerns separated; easier to maintain
+3. **Beat chase buttons (8-button flash pattern)** — Synchronized with knob rings; on/off only (no velocity dimming)
+4. **Master fader for motor speed** — Contextually sensible for speed control
+5. **Pixel sampling for exact button centres** — No guessing; measured RGB bands
+6. **`round()` not `int()` for LED feedback** — Ensures CW and CCW detents feel equal
+7. **Modular package structure** — Keeps concerns separated; easier to maintain
+8. **3-column GUI layout** — Left: frames, Center: APC40, Right: controls; optimized for 1920×1080
+9. **Canvas aspect ratio correction (1100→1222px)** — Matches original image 1.666:1 ratio
+10. **Relative encoder decoding for BPM knob** — Direct value interpretation (64=center, <64=CW, >64=CCW)
+11. **±0.01 BPM fine adjust granularity** — Precise tempo control without rapid jumps
 
 ---
 
@@ -372,6 +498,12 @@ This document chronicles the development of MIDI/Art-Net control, APC40 MK2 inte
 - **Transparent UI > opaque widgets**: Canvas text overlays work better than blocking buttons
 - **Revert early if visual result is poor**: The "animated fader caps" looked messy; yellow lines stayed clean
 - **Modular code pays off**: 8 small modules are easier to navigate than 2400 lines
+- **MIDI relative encoders need decoder knowledge**: APC40 uses 64=center encoding, not delta-tracking
+- **Flash effects beat velocity dimming**: Button LEDs only support on/off; pulse effects impossible
+- **Deferred initialization needed for complex layouts**: UI elements must be fully constructed before polling/updating
+- **Aspect ratio matters visually**: Stretching canvas distorts controller image; correct ratio looks professional
+- **Direct value decoding > magnitude multiplication**: For ±0.01 BPM, treat each message as single step, not scaled delta
+- **Test encoder direction empirically**: CW/CCW can be inverted depending on hardware encoding; verify with user
 
 ---
 

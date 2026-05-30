@@ -17,9 +17,9 @@ from .constants import (
     FRAMES, UNIVERSE, PATTERNS, BEAT_OPTIONS, SPEEDS,
     APC_CLIP_CH, _apc_clip_note,
     APC_ROW_SIZE_PAT, APC_ROW_SIZE_BEAT, APC_ROW_POS_PAT, APC_ROW_POS_BEAT,
-    APC_BEAT_VALUES,
+    APC_SIZE_BEAT_VALUES, APC_POS_BEAT_VALUES,
     APC_CC_DEVICE_KNOB_BASE, APC_CC_DEVICE_KNOB_RING_BASE,
-    APC_BEAT_KNOB_ORDER, APC_SINGLE_RING_POS,
+    APC_BEAT_KNOB_ORDER, APC_SINGLE_RING_POS, APC_KNOB_BEAT_SCALES,
     APC_NOTE_DEVICE_BTN_ALL,
     APC_BTN_BPM_SYNC, APC_BTN_AUDIO_SYNC, APC_BTN_LINK,
     APC_BTN_RESYNC, APC_BTN_TAP, APC_BTN_NUDGE_MINUS, APC_BTN_NUDGE_PLUS,
@@ -34,10 +34,23 @@ from .constants import (
 )
 from .network import send_universe, osc_send, _osc_sock, _osc_parse
 from .beat import BeatClock
-from .audio import AudioBPMDetector, AUDIO_AVAILABLE, _AUBIO_OK, _PAW_OK, get_audio_devices
+from .audio import AudioBPMDetector, AUDIO_AVAILABLE, _AUBIO_OK, _PAW_OK, get_audio_devices, np
 from .link import LINK_AVAILABLE, _link, _link_api, _lnk_peers, _lnk_get_tempo, _lnk_get_beat
 from .midi import MIDI_AVAILABLE, mido
 from .ui_utils import _hr, _hov
+from .gpu_spectrum import try_create_renderer as _try_create_gl_spectrum
+from .gpu_waveform import try_create_renderer as _try_create_gl_waveform
+
+try:
+    from PIL import (Image as _PILImage,
+                      ImageTk as _PILImageTk,
+                      ImageDraw as _PILImageDraw)
+    _PIL_OK = True
+except ImportError:
+    _PILImage = None       # type: ignore
+    _PILImageTk = None     # type: ignore
+    _PILImageDraw = None   # type: ignore
+    _PIL_OK = False
 
 log = logging.getLogger("blinds")
 
@@ -71,7 +84,47 @@ class BlindsApp(tk.Tk):
         # Beat source toggle + unified phase offset (drives resync / nudge).
         # Off by default → clock (audio/manual BPM); check to follow Ableton Link.
         self._link_on    = tk.BooleanVar(value=False)
-        self._beat_offset = 0.0   # beats; adjusted by resync / nudge
+        self._beat_offset        = 0.0   # beats; adjusted by resync / nudge
+        self._resync_time        = 0.0   # wall-clock time of last resync (perf_counter)
+        self._beats_since_resync = 0     # audio-detected beats since last resync
+        # Highest madmom beat timestamp we've already counted into
+        # _beats_since_resync — keeps the counter monotonic across the ~1 s
+        # inference cycles (madmom REPLACES its beat_times each cycle).
+        self._madmom_beats_seen_t = 0.0
+        self._last_kick_time     = 0.0   # perf_counter of last strong kick
+        # Phase-lock freeze: madmom's continuous phase tracker is suppressed
+        # for a short window after a resync so it can't drift the LEDs away
+        # from the beat-1 we just snapped to.
+        self._phase_lock_freeze_until: float = 0.0
+        # Spectrum bitmap renderer state — lazily built on first frame and
+        # rebuilt whenever the canvas resizes.
+        self._spec_buf: Any      = None  # uint8 (H, W, 3) — RGB pixels
+        self._spec_pil: Any      = None  # PIL.Image wrapping the buffer
+        self._spec_photo: Any    = None  # ImageTk.PhotoImage for the canvas
+        self._spec_image_id      = None
+        self._spec_col_color: Any= None  # (W, 3) per-column tint by frequency
+        self._spec_peak: Any     = None  # (W,) peak-hold height per column
+        self._spec_y_grid: Any   = None  # (H, 1) cached np.arange(H)
+        # GPU-rendered spectrum (moderngl). None if moderngl is not installed
+        # or the GL context fails — the CPU bitmap path is used as a fallback.
+        self._gl_spectrum: Any   = _try_create_gl_spectrum()
+        self._gl_waveform: Any   = _try_create_gl_waveform()
+        # Native (embedded glfw) spectrum panel — created in _build_big_spectrum
+        # once we have a tk frame to parent into.  None means "use the canvas
+        # + PhotoImage fallback path".
+        self._native_spec: Any   = None
+        # Per-column dB peak with continuous decay (80 dB/s) so transients
+        # rise instantly but tails decay smoothly.
+        self._spec_decay_db: Any = None
+        self._spec_last_t: float = 0.0
+        self._wave_last_t: float = 0.0
+        # Waveform bitmap renderer state — same architecture as the spectrum.
+        self._wave_buf_arr: Any  = None  # uint8 (H, W, 3)
+        self._wave_pil: Any      = None
+        self._wave_photo: Any    = None
+        self._wave_image_id      = None
+        self._wave_y_grid: Any   = None
+        self._wave_static_bg: Any= None
         self._suspend_send = False  # guard to coalesce batched frame updates
 
         self._ip_vars = [tk.StringVar(value=f["ip"]) for f in FRAMES]
@@ -104,6 +157,10 @@ class BlindsApp(tk.Tk):
         # Beat-chase state: which of the 8 buttons (knobs or device buttons) is
         # currently lit. None means no LED is lit yet (or MIDI isn't connected).
         self._chase_last_btn: "int | None" = None
+        # Per-knob last sent CC value + button state — used to skip MIDI sends
+        # when nothing would change (saves bandwidth at slow beat scales).
+        self._knob_prev_cc:  list = [-1]    * 8
+        self._knob_btn_on:   list = [False] * 8
 
         # Per-window status from the firmware (updated by the telemetry thread).
         # keys: cal[2], homed[2], max[2], pos[2], seen(bool/timestamp)
@@ -131,6 +188,9 @@ class BlindsApp(tk.Tk):
         self.after(0, self._poll_link)        # schedule after UI is fully laid out
         self.after(300, self._refresh_status_labels)
         self.after(120, self._draw_preview)   # first draw after layout
+        # Auto-detect the APC40 MK2 a moment after startup; retry a few times
+        # so devices plugged in just after launch still get picked up.
+        self.after(400, self._auto_connect_apc40)
         self.protocol("WM_DELETE_WINDOW", self._on_close)
 
     # ═════════════════════════════════════════════════════════════════════════
@@ -151,30 +211,53 @@ class BlindsApp(tk.Tk):
         tk.Label(title_box, text=f"Art-Net unicast  •  Universe {UNIVERSE}",
                  font=("Segoe UI", 9), bg=BG, fg=DIM).pack()
 
-        # ── Three-column layout: Frames (left) | APC40 (center) | Options (right) ──
+        # ── Three-column layout: Frames (L) | Spectrum/APC40 (C) | Controls (R) ──
         main = tk.Frame(self, bg=BG)
         main.pack(fill="both", expand=True, padx=12, pady=(6, 0))
 
         # Left column: Frame cards (vertical stack)
         self._build_frame_cards_vertical(parent=main)
 
-        # Center column: APC40 visualisation + mapped clickable controls
-        self._build_apc40_canvas(parent=main)
-
-        # Right column: Art-Net controls and audio device selection
-        # (Gap Position, Gap Size, and BPM controls are on the APC40 canvas)
+        # Right column FIRST (so center gets the leftover horizontal space).
+        # expand=False so right_col only takes as wide as its content needs.
         right_col = tk.Frame(main, bg=BG)
-        right_col.pack(side="right", fill="both", expand=True, padx=(8, 0))
+        right_col.pack(side="right", fill="y", expand=False, padx=(8, 0))
 
         _hr(right_col)
         self._build_artnet_controls(parent=right_col)
         _hr(right_col)
         self._build_audio_section(parent=right_col)
+        _hr(right_col)
+        self._build_beat_visualizer(parent=right_col)
         tk.Frame(right_col, bg=BG, height=14).pack()
 
-        # Constrain window so the APC40 canvas always shows fully.
-        # Width: frames (220) + apc40 (1222) + options (400) + margins = ~1900px
-        self.minsize(1900, 800)
+        # Center column: big spectrum on top (expanding) + APC40 at bottom.
+        center_col = tk.Frame(main, bg=BG)
+        center_col.pack(side="left", fill="both", expand=True)
+        # Pack APC40 first with side="bottom" so it docks at the bottom; the
+        # spectrum then fills all the remaining vertical space above it.
+        self._build_apc40_canvas(parent=center_col)
+        self._build_big_spectrum(parent=center_col)
+
+        # Keep _clock.bpm in sync whenever _bpm_var changes (audio, tap, Link, slider).
+        # _build_bpm_section is not called so this trace must live here.
+        self._bpm_var.trace_add("write",
+            lambda *_: setattr(self._clock, "bpm", self._bpm_var.get()))
+
+        # _poll_link needs _link_lbl — create a minimal hidden one so it never crashes.
+        self._link_lbl = tk.Label(self, text="", font=("Segoe UI", 9),
+                                  bg=BG, fg=DIM)
+        # (not packed — invisible; status shown in the audio section)
+
+        # ── Window sizing constrained to fit a 1920×1080 monitor ───────────
+        # Right-side taskbar takes 65 px; bottom edge is fully usable.
+        screen_w = self.winfo_screenwidth()
+        screen_h = self.winfo_screenheight()
+        target_w = min(screen_w - 65, 1855)   # right taskbar
+        target_h = min(screen_h,      1040)   # title bar overhead only
+        self.geometry(f"{target_w}x{target_h}+0+0")
+        self.maxsize(target_w, target_h)
+        self.minsize(1400, 900)
 
     # ── APC40 image canvas with overlaid mapped controls ─────────────────────
     # All overlays are CANVAS ITEMS, not widgets — so no opaque button face
@@ -214,7 +297,10 @@ class BlindsApp(tk.Tk):
         self._apc40_tkimg = ImageTk.PhotoImage(pil)   # MUST keep reference
 
         wrap = tk.Frame(parent, bg=BG)
-        wrap.pack(side="left", pady=(6, 0))
+        # Dock at the bottom of the centre column — bottom of the APC40 image
+        # aligns with the bottom of the window, freeing the upper area for the
+        # spectrum analyzer.
+        wrap.pack(side="bottom", anchor="s", pady=(0, 0))
         c = tk.Canvas(wrap, width=APC40_W, height=APC40_H,
                       bg=BG, highlightthickness=0, bd=0)
         c.pack()
@@ -228,9 +314,10 @@ class BlindsApp(tk.Tk):
         self._apc_pos_beat_btns:  list = []
         self._apc_master_btns:    dict = {}   # name → dict
 
-        pat_labels  = ["Still", "Uniform", "Wave→", "←Wave",
-                       "Spread", "Counter", "Scatter"]
-        beat_labels = [f"{int(v)}" for v in APC_BEAT_VALUES]
+        pat_labels       = ["Still", "Uniform", "Wave→", "←Wave",
+                            "Spread", "Counter", "Scatter"]
+        size_beat_labels = [str(int(v)) for v in APC_SIZE_BEAT_VALUES]
+        pos_beat_labels  = [str(int(v)) for v in APC_POS_BEAT_VALUES]
 
         origin_x, origin_y = APC40_POS["clip_origin"]
         dx, dy = APC40_POS["clip_dx"], APC40_POS["clip_dy"]
@@ -255,10 +342,10 @@ class BlindsApp(tk.Tk):
                     cx, y_sp, cw, ch_, pat_labels[col],
                     lambda fn=p[1], nm=p[0]: self._set_size_pattern(fn, nm))))
 
-            v = APC_BEAT_VALUES[col]
+            v_size = APC_SIZE_BEAT_VALUES[col]
             self._apc_size_beat_btns.append((col, self._mk_canvas_btn(
-                cx, y_sb, cw, ch_, beat_labels[col],
-                lambda val=v: self._set_size_sync(val))))
+                cx, y_sb, cw, ch_, size_beat_labels[col],
+                lambda val=v_size: self._set_size_sync(val))))
 
             if col == 0:
                 self._apc_pos_pat_btns.append((0, self._mk_canvas_btn(
@@ -270,9 +357,10 @@ class BlindsApp(tk.Tk):
                     cx, y_pp, cw, ch_, pat_labels[col],
                     lambda fn=p[1], nm=p[0]: self._set_pos_pattern(fn, nm))))
 
+            v_pos = APC_POS_BEAT_VALUES[col]
             self._apc_pos_beat_btns.append((col, self._mk_canvas_btn(
-                cx, y_pb, cw, ch_, beat_labels[col],
-                lambda val=v: self._set_pos_sync(val))))
+                cx, y_pb, cw, ch_, pos_beat_labels[col],
+                lambda val=v_pos: self._set_pos_sync(val))))
 
         # ── Master-section buttons ───────────────────────────────────────────
         # Each label is drawn ABOVE its cream button in the same grey/font as
@@ -314,8 +402,8 @@ class BlindsApp(tk.Tk):
         fx, fy, fw, fh = APC40_POS["fader_1"]
 
         # Label above fader
-        c.create_text(fx, fy - 14, text="GAP POS",
-                     fill=self.APC_LABEL_PRINTED, font=("Segoe UI", 7, "bold"),
+        c.create_text(fx, fy - 11, text="GAP POS",
+                     fill=self.APC_LABEL_PRINTED, font=("Segoe UI", 6, "bold"),
                      anchor="center")
 
         def marker_y() -> float:
@@ -348,8 +436,8 @@ class BlindsApp(tk.Tk):
 
         # Motor speed percentage display above fader
         self._apc_motor_speed_text = c.create_text(
-            sx, sy - 14, text="0%/s",
-            fill=self.APC_BPM_FG, font=("Segoe UI", 8, "bold"),
+            sx, sy - 11, text="0%/s",
+            fill=self.APC_BPM_FG, font=("Segoe UI", 6, "bold"),
             anchor="center")
 
         def motor_marker_y() -> float:
@@ -386,15 +474,15 @@ class BlindsApp(tk.Tk):
         kx, ky = APC40_POS["knob_gap_size"]
 
         # Label above knob
-        c.create_text(kx, ky - 30, text="GAP SIZE",
-                     fill=self.APC_LABEL_PRINTED, font=("Segoe UI", 7, "bold"),
+        c.create_text(kx, ky - 23, text="GAP SIZE",
+                     fill=self.APC_LABEL_PRINTED, font=("Segoe UI", 6, "bold"),
                      anchor="center")
 
         self._apc_gap_size_text = c.create_text(
             kx, ky, text=f"{self._gap_size_var.get():.1f}%",
-            fill=self.APC_BPM_FG, font=("Segoe UI", 9, "bold"),
+            fill=self.APC_BPM_FG, font=("Segoe UI", 7, "bold"),
             anchor="center", tags=("knob_gs",))
-        c.create_oval(kx - 22, ky - 22, kx + 22, ky + 22,
+        c.create_oval(kx - 17, ky - 17, kx + 17, ky + 17,
                        fill="", outline="", tags=("knob_gs",))
 
         knob_drag = {"y0": 0, "v0": 0.0}
@@ -404,15 +492,15 @@ class BlindsApp(tk.Tk):
             knob_drag["v0"] = self._gap_size_var.get()
 
         def knob_drag_motion(e):
-            # 100 px of vertical travel = full 0–25 % range; up = increase
+            # 75 px of vertical travel = full 0–25 % range; up = increase
             dy   = knob_drag["y0"] - e.y
-            new  = max(0.0, min(25.0, knob_drag["v0"] + dy * (25.0 / 100.0)))
+            new  = max(0.0, min(25.0, knob_drag["v0"] + dy * (25.0 / 75.0)))
             self._gap_size_var.set(round(new, 1))
 
         def knob_wheel(e):
             # tag_bind doesn't accept <MouseWheel>, so we bind at canvas level
             # and gate on cursor proximity to the knob centre.
-            if (e.x - kx) ** 2 + (e.y - ky) ** 2 > 22 * 22:
+            if (e.x - kx) ** 2 + (e.y - ky) ** 2 > 17 * 17:
                 return
             step = 0.5 if abs(e.delta) >= 120 else 0.1
             sign = 1 if e.delta > 0 else -1
@@ -434,36 +522,30 @@ class BlindsApp(tk.Tk):
         # ── BPM fine adjust knob (±0.01 per encoder click) ──────────────────
         bfx, bfy = APC40_POS["knob_bpm_fine"]
 
-        # Label above knob
-        c.create_text(bfx, bfy - 28, text="BPM fine adjust",
-                     fill=self.APC_LABEL_PRINTED, font=("Segoe UI", 7, "bold"),
-                     anchor="center")
+        # Label above knob (two lines, centered)
+        c.create_text(bfx, bfy - 29, text="BPM\nfine adjust",
+                     fill=self.APC_LABEL_PRINTED, font=("Segoe UI", 6, "bold"),
+                     anchor="center", justify="center")
 
-        self._apc_bpm_fine_text = c.create_text(
-            bfx, bfy, text="◇",
-            fill=self.APC_BPM_FG, font=("Segoe UI", 16, "bold"),
-            anchor="center", tags=("knob_bpm_fine",))
-        c.create_oval(bfx - 18, bfy - 18, bfx + 18, bfy + 18,
+        # Invisible hit area for the knob
+        c.create_oval(bfx - 14, bfy - 14, bfx + 14, bfy + 14,
                        fill="", outline="", tags=("knob_bpm_fine",))
 
         def on_bpm_fine_cc(cc_value):
             """Handle CC 13 input: APC40 relative encoder
-            64 = center (no change)
-            1-63 = left turn (CCW) by (64-value) steps
-            65-127 = right turn (CW) by (value-64) steps
-            Each step = ±0.01 BPM"""
+            Each message = one encoder click = ±0.01 BPM
+            64 = no change (center)
+            < 64 = CW turn (right) → +0.01 BPM
+            > 64 = CCW turn (left) → -0.01 BPM"""
             if cc_value == 64:
                 return  # no change
 
-            # Calculate direction and magnitude
             if cc_value < 64:
-                # CCW turn: 63→1 step, 62→2 steps, etc.
-                steps = 64 - cc_value
-                adjustment = -steps * 0.01
+                # CW turn: +0.01 BPM
+                adjustment = 0.01
             else:
-                # CW turn: 65→1 step, 127→63 steps
-                steps = cc_value - 64
-                adjustment = steps * 0.01
+                # CCW turn: -0.01 BPM
+                adjustment = -0.01
 
             new_bpm = self._bpm_var.get() + adjustment
             self._bpm_var.set(round(new_bpm, 2))
@@ -474,7 +556,7 @@ class BlindsApp(tk.Tk):
         bx, by = APC40_POS["bpm_display"]
         self._apc_bpm_text = c.create_text(
             bx, by, text=f"{self._bpm_var.get():.2f}",
-            fill=self.APC_BPM_FG, font=("Segoe UI", 18, "bold"),
+            fill=self.APC_BPM_FG, font=("Segoe UI", 14, "bold"),
             anchor="center")
         self._bpm_var.trace_add("write", lambda *_: c.itemconfig(
             self._apc_bpm_text, text=f"{self._bpm_var.get():.2f}"))
@@ -485,7 +567,7 @@ class BlindsApp(tk.Tk):
                         label: str, command,
                         label_dy: float = 0,
                         color_off: str | None = None,
-                        font: tuple = ("Segoe UI", 12, "bold")) -> dict:
+                        font: tuple = ("Segoe UI", 9, "bold")) -> dict:
         """Transparent canvas button — text only, hit-detected via an invisible
         rectangle at (x, y). The label is drawn at (x, y + label_dy) — use a
         negative dy to put it ABOVE the hit area. Pass label="" for a fully
@@ -536,13 +618,13 @@ class BlindsApp(tk.Tk):
             name = "Still" if col == 0 else PATTERNS[col - 1][0]
             tint(btn, self._size_pat_selected == name)
         for col, btn in self._apc_size_beat_btns:
-            tint(btn, self._size_sync_beats == APC_BEAT_VALUES[col])
+            tint(btn, self._size_sync_beats == APC_SIZE_BEAT_VALUES[col])
 
         for col, btn in self._apc_pos_pat_btns:
             name = "Still" if col == 0 else PATTERNS[col - 1][0]
             tint(btn, self._pos_pat_selected == name)
         for col, btn in self._apc_pos_beat_btns:
-            tint(btn, self._pos_sync_beats == APC_BEAT_VALUES[col])
+            tint(btn, self._pos_sync_beats == APC_POS_BEAT_VALUES[col])
 
         tint(self._apc_master_btns["bpm_sync"],    self._bpm_on.get())
         tint(self._apc_master_btns["audio_sync"],
@@ -552,11 +634,13 @@ class BlindsApp(tk.Tk):
     # ── Frame cards (vertical stack on left) ─────────────────────────────────
 
     def _build_frame_cards_vertical(self, parent=None):
-        """Stack frame cards vertically on the left side."""
+        """Stack frame cards vertically on the left side, ~148 px wide."""
         if parent is None:
             parent = self
         col = tk.Frame(parent, bg=BG)
-        col.pack(side="left", fill="y", padx=(0, 8))
+        col.pack(side="left", fill="y", padx=(0, 6))
+        # Zero-height width spacer locks the column width; cards fill="x" inherit it
+        tk.Frame(col, bg=BG, height=0, width=148).pack()
         for row_idx, cfg in enumerate(FRAMES):
             self._frame_card(col, row_idx, cfg, layout="vertical")
 
@@ -570,31 +654,38 @@ class BlindsApp(tk.Tk):
             self._frame_card(row, col, cfg, layout="horizontal")
 
     def _frame_card(self, parent, idx, cfg, layout="horizontal"):
-        card = tk.Frame(parent, bg=CARD, padx=12, pady=10, width=200)
+        # Compact card. Bottom/Top labels sit above their sliders with the
+        # percentage right-aligned on the same row; "offline" centres below
+        # the calibrate button. The column itself fixes the width (see
+        # _build_frame_cards_vertical), so cards just fill="x".
+        card = tk.Frame(parent, bg=CARD, padx=8, pady=8)
         if layout == "horizontal":
-            card.grid(row=0, column=idx, padx=5)
+            card.grid(row=0, column=idx, padx=3, sticky="n")
         else:  # vertical
-            card.pack(fill="x", pady=4)
+            card.pack(fill="x", pady=3)
 
         tk.Label(card, text=cfg["name"],
                  font=("Segoe UI", 10, "bold"), bg=CARD, fg=BLUE).pack()
         tk.Entry(card, textvariable=self._ip_vars[idx],
-                 font=("Segoe UI", 8), bg=BTN, fg=FG,
-                 insertbackground=FG, relief="flat", width=15).pack(pady=(0, 8))
+                 font=("Segoe UI", 8), bg=BTN, fg=FG, justify="center",
+                 insertbackground=FG, relief="flat").pack(fill="x", pady=(0, 6))
 
         pv   = self._pvars[idx]
         lbls = {}
         for key, text in (("b", "Bottom"), ("t", "Top")):
-            r = tk.Frame(card, bg=CARD)
-            r.pack(fill="x", pady=3)
-            tk.Label(r, text=text, font=("Segoe UI", 9),
-                     bg=CARD, fg=FG, width=7, anchor="w").pack(side="left")
-            ttk.Scale(r, from_=0, to=100, orient="horizontal",
-                      variable=pv[key], length=125).pack(side="left", padx=3)
-            lbl = tk.Label(r, text="  0%", font=("Segoe UI", 9, "bold"),
-                           bg=CARD, fg=GREEN, width=5)
-            lbl.pack(side="left")
+            # Header row: label left, percentage right
+            hdr = tk.Frame(card, bg=CARD)
+            hdr.pack(fill="x", pady=(2, 0))
+            tk.Label(hdr, text=text, font=("Segoe UI", 9),
+                     bg=CARD, fg=FG, anchor="w").pack(side="left")
+            lbl = tk.Label(hdr, text="0%", font=("Segoe UI", 9, "bold"),
+                           bg=CARD, fg=GREEN, anchor="e")
+            lbl.pack(side="right")
             lbls[key] = lbl
+
+            # Slider underneath, stretches to card width
+            ttk.Scale(card, from_=0, to=100, orient="horizontal",
+                      variable=pv[key]).pack(fill="x", pady=(0, 3))
 
             def _on_write(*_, frame_idx=idx, k=key):
                 self._refresh_lbl(frame_idx, k)
@@ -605,12 +696,13 @@ class BlindsApp(tk.Tk):
 
         self._plbls.append(lbls)
 
-        # Calibration trigger + live status (steps) for this window
+        # Calibration trigger + status (centred under the button)
         tk.Button(card, text="Calibrate window", font=("Segoe UI", 8),
-                  bg=BTN, fg=BTNFG, relief="flat", padx=8, pady=4, cursor="hand2",
-                  command=lambda i=idx: self._calibrate_window(i)).pack(pady=(8, 2))
-        stat = tk.Label(card, text="status: —", font=("Consolas", 8),
-                        bg=CARD, fg=DIM, justify="left", anchor="w")
+                  bg=BTN, fg=BTNFG, relief="flat", padx=4, pady=4, cursor="hand2",
+                  command=lambda i=idx: self._calibrate_window(i)).pack(
+                      fill="x", pady=(6, 2))
+        stat = tk.Label(card, text="offline", font=("Consolas", 8),
+                        bg=CARD, fg=DIM, anchor="center")
         stat.pack(fill="x")
         self._stat_lbls.append(stat)
 
@@ -1046,7 +1138,15 @@ class BlindsApp(tk.Tk):
     def _resync(self):
         """Reset the pattern phase to 0 — re-homes the animation to its start.
         Works for both Link and the internal clock."""
-        self._beat_offset = -self._current_raw_beat()
+        now = time.perf_counter()
+        self._beat_offset         = -self._current_raw_beat()
+        self._resync_time         = now
+        self._beats_since_resync  = 0
+        self._madmom_beats_seen_t = now
+        # Suppress madmom's continuous phase tracker for 2 s after a resync
+        # so it doesn't immediately drift the LEDs away from beat 1.
+        self._phase_lock_freeze_until = now + 2.0
+        log.info("RESYNC at %.3f — effective beat snapped to 0", now)
         if not self._bpm_on.get():
             self._push_from_gap_controls()
 
@@ -1215,9 +1315,19 @@ class BlindsApp(tk.Tk):
                  bg=BG, fg=FG, width=7, anchor="w").pack(side="left")
         self._audio_devs = get_audio_devices()
         dev_names = [d[0] for d in self._audio_devs] if self._audio_devs else ["(no devices found)"]
-        self._audio_dev_var = tk.StringVar(value=dev_names[0])
+        # Prefer the Roland Rubix loopback if present; otherwise the first
+        # loopback device; otherwise whatever's first in the list.
+        default = next(
+            (n for n in dev_names if "rubix" in n.lower()
+             and "loopback" in n.lower()),
+            None)
+        if default is None:
+            default = next(
+                (n for n in dev_names if "loopback" in n.lower()),
+                None)
+        self._audio_dev_var = tk.StringVar(value=default or dev_names[0])
         ttk.Combobox(dev_row, textvariable=self._audio_dev_var,
-                     values=dev_names, width=38, state="readonly").pack(side="left", padx=4)
+                     values=dev_names, width=28, state="readonly").pack(side="left", padx=4)
         self._audio_btn = tk.Button(dev_row, text="Start Audio",
                                     font=("Segoe UI", 9), bg=BTN, fg=BTNFG,
                                     relief="flat", padx=10, pady=4, cursor="hand2",
@@ -1246,18 +1356,781 @@ class BlindsApp(tk.Tk):
         self._audio_bpm_lbl.pack(side="left")
         tk.Label(st, text="BPM", font=("Segoe UI", 9),
                  bg=BG, fg=DIM).pack(side="left", padx=(2, 12))
-        self._audio_conf_lbl = tk.Label(st, text="(feeds into BPM clock  •  errors shown here)",
+        self._audio_conf_lbl = tk.Label(st, text="(waiting for audio)",
                                          font=("Segoe UI", 9), bg=BG, fg=DIM, anchor="w",
-                                         wraplength=600, justify="left")
+                                         wraplength=200, justify="left")
         self._audio_conf_lbl.pack(side="left", fill="x", expand=True)
 
+        # madmom is the sole BPM detector — no toggle, just an availability note
+        from .bpm_madmom import is_available as _madmom_available
+        if not _madmom_available():
+            tk.Label(sec, text="madmom not available — BPM detection disabled",
+                     font=("Segoe UI", 8), bg=BG, fg=RED).pack(anchor="w",
+                                                                pady=(2, 0))
+
         self.after(100, self._poll_audio_level)
+
+    # ── Beat counter + phase meter + waveform analyzer ───────────────────────
+
+    def _build_big_spectrum(self, parent=None):
+        """Large spectrum analyzer that fills the space above the APC40 canvas.
+        Band controls remain in the right column.
+
+        Prefers a native OpenGL panel (glfw child window inside a tk Frame)
+        which renders directly to the swap chain and avoids the ~10 ms cost
+        of the PhotoImage upload.  Falls back to a tk.Canvas + PhotoImage
+        path if glfw / Win32 reparenting isn't available."""
+        if parent is None:
+            parent = self
+        sec = tk.Frame(parent, bg=BG)
+        sec.pack(side="top", fill="both", expand=True, padx=8, pady=(8, 4))
+
+        hdr = tk.Frame(sec, bg=BG)
+        hdr.pack(fill="x")
+        tk.Label(hdr, text="SPECTRUM ANALYZER",
+                 font=("Segoe UI", 11, "bold"), bg=BG, fg=FG).pack(side="left")
+        tk.Label(hdr, text="  log frequency · dB FS · peak-hold smoothing",
+                 font=("Segoe UI", 8), bg=BG, fg=DIM).pack(side="left")
+
+        # Holder Frame — host for either the native GL child window OR the
+        # fallback tk.Canvas.  Border colour matches the previous canvas.
+        spec_holder = tk.Frame(sec, bg="#0d0d17", highlightthickness=1,
+                                highlightbackground=BTN)
+        spec_holder.pack(fill="both", expand=True, pady=(4, 0))
+        self._spec_holder = spec_holder
+
+        # Try to embed a native GLFW child window via Win32 SetParent.
+        from .gl_native_spectrum import try_create as _try_native_spec
+        spec_holder.update_idletasks()
+        init_w = max(800, spec_holder.winfo_width())
+        init_h = max(150, spec_holder.winfo_height())
+        self._native_spec = _try_native_spec(spec_holder, init_w, init_h)
+
+        if self._native_spec is not None:
+            # Resize the embedded child window whenever the host frame resizes
+            def _on_resize(event, ns=self._native_spec):
+                ns.set_geometry(event.width, event.height)
+            spec_holder.bind("<Configure>", _on_resize)
+            # No tk.Canvas / PhotoImage path is needed in this mode.
+            self._spec_canvas = None
+            log.info("Spectrum: native GL panel active (no PhotoImage upload)")
+        else:
+            # Fallback path — tk.Canvas with PIL-baked bitmap
+            self._spec_canvas = tk.Canvas(spec_holder, bg="#0d0d17",
+                                           highlightthickness=0)
+            self._spec_canvas.pack(fill="both", expand=True)
+            log.info("Spectrum: tk.Canvas fallback (PhotoImage upload)")
+
+    def _build_beat_visualizer(self, parent=None):
+        if parent is None:
+            parent = self
+        sec = tk.Frame(parent, bg=BG)
+        sec.pack(padx=20, pady=(4, 0), fill="x")
+
+        tk.Label(sec, text="BEAT VISUALIZER",
+                 font=("Segoe UI", 10, "bold"), bg=BG, fg=FG).pack(anchor="w", pady=(0, 6))
+
+        # ── Beat counter: 4 boxes labelled 1–4 + total count since resync ──
+        beat_row = tk.Frame(sec, bg=BG)
+        beat_row.pack(fill="x", pady=(0, 4))
+        tk.Label(beat_row, text="Beat:", font=("Segoe UI", 9),
+                 bg=BG, fg=DIM, width=6, anchor="w").pack(side="left")
+        self._beat_boxes = []
+        for i in range(4):
+            box = tk.Canvas(beat_row, width=46, height=32,
+                            bg=BTN, highlightthickness=1,
+                            highlightbackground=DIM)
+            box.pack(side="left", padx=3)
+            lbl = box.create_text(23, 16, text=str(i + 1),
+                                  fill=FG, font=("Segoe UI", 13, "bold"))
+            self._beat_boxes.append((box, lbl))
+
+        # Counter row: detected beats and clock beats since resync
+        ctr_row = tk.Frame(sec, bg=BG)
+        ctr_row.pack(fill="x", pady=(0, 6))
+        tk.Label(ctr_row, text="Since resync:", font=("Segoe UI", 8),
+                 bg=BG, fg=DIM, width=12, anchor="w").pack(side="left")
+        self._beats_detected_lbl = tk.Label(ctr_row,
+            text="detected: — ", font=("Segoe UI", 8, "bold"), bg=BG, fg=GREEN)
+        self._beats_detected_lbl.pack(side="left", padx=(0, 8))
+        self._beats_clock_lbl = tk.Label(ctr_row,
+            text="clock: — ", font=("Segoe UI", 8), bg=BG, fg=DIM)
+        self._beats_clock_lbl.pack(side="left", padx=(0, 8))
+        self._beats_drift_lbl = tk.Label(ctr_row,
+            text="drift: — ", font=("Segoe UI", 8), bg=BG, fg=YELLOW)
+        self._beats_drift_lbl.pack(side="left")
+
+        # ── Phase meter bar ──────────────────────────────────────────────────
+        phase_row = tk.Frame(sec, bg=BG)
+        phase_row.pack(fill="x", pady=(0, 6))
+        tk.Label(phase_row, text="Phase:", font=("Segoe UI", 9),
+                 bg=BG, fg=DIM, width=6, anchor="w").pack(side="left")
+        self._phase_canvas = tk.Canvas(phase_row, height=18, bg=CARD,
+                                       highlightthickness=0)
+        self._phase_canvas.pack(side="left", fill="x", expand=True)
+        self._phase_bar  = self._phase_canvas.create_rectangle(
+            0, 0, 0, 18, fill=BLUE, outline="")
+        self._phase_tick = self._phase_canvas.create_line(
+            0, 0, 0, 18, fill=YELLOW, width=2)
+
+        # ── Waveform canvas ──────────────────────────────────────────────────
+        tk.Label(sec, text="Waveform  (last 16 beats)",
+                 font=("Segoe UI", 8), bg=BG, fg=DIM).pack(anchor="w")
+        self._wave_canvas = tk.Canvas(sec, height=110, bg="#0d0d17",
+                                      highlightthickness=1,
+                                      highlightbackground=BTN)
+        self._wave_canvas.pack(fill="x", pady=(2, 0))
+
+        # ── Band isolation controls ──────────────────────────────────────────
+        # (The full-size spectrum canvas lives above the APC40 — see _build_big_spectrum.)
+        # The Kick + Hi-hat bands shown here are what aubio sees for beat detection.
+        # Coloured overlays on the spectrum show the active filter ranges.
+        det = self._audio_det
+        def _dv(attr, default):
+            return tk.DoubleVar(value=getattr(det, attr) if det else default)
+        self._kick_low_var    = _dv("DEFAULT_KICK_LOW",    40.0)
+        self._kick_high_var   = _dv("DEFAULT_KICK_HIGH",   180.0)
+        self._hihat_low_var   = _dv("DEFAULT_HIHAT_LOW",   5000.0)
+        self._hihat_high_var  = _dv("DEFAULT_HIHAT_HIGH",  12000.0)
+        self._kick_weight_var = _dv("DEFAULT_KICK_WEIGHT", 3.0)
+
+        bands = tk.Frame(sec, bg=BG)
+        bands.pack(fill="x", pady=(6, 0))
+        self._make_band_sliders(bands, "Kick", "#ffa500",
+                                self._kick_low_var,  10,   500,
+                                self._kick_high_var, 60,  1000, row=0)
+        self._make_band_sliders(bands, "Hi-hat", "#00bfff",
+                                self._hihat_low_var,  500, 12000,
+                                self._hihat_high_var, 2000, 18000, row=1)
+
+        # Wire band sliders + kick weight → audio detector
+        for v in (self._kick_low_var, self._kick_high_var,
+                  self._hihat_low_var, self._hihat_high_var,
+                  self._kick_weight_var):
+            v.trace_add("write", self._apply_band_settings)
+
+        # ── Mix weight row ──────────────────────────────────────────────────
+        ctrl = tk.Frame(sec, bg=BG)
+        ctrl.pack(fill="x", pady=(8, 0))
+        tk.Label(ctrl, text="Kick wt:", font=("Segoe UI", 9, "bold"),
+                 bg=BG, fg="#ffa500").pack(side="left")
+        ttk.Scale(ctrl, from_=0.5, to=6.0, orient="horizontal",
+                  variable=self._kick_weight_var, length=90).pack(side="left", padx=4)
+        self._kick_weight_lbl = tk.Label(ctrl, text="3.0×",
+                                          font=("Segoe UI", 8, "bold"),
+                                          bg=BG, fg="#ffa500", width=5)
+        self._kick_weight_lbl.pack(side="left", padx=(0, 8))
+        self._kick_weight_var.trace_add("write",
+            lambda *_: self._kick_weight_lbl.config(
+                text=f"{self._kick_weight_var.get():.1f}×"))
+        self._kick_weight_lbl.config(text=f"{self._kick_weight_var.get():.1f}×")
+
+        self._auto_resync_var = tk.BooleanVar(value=True)
+        tk.Checkbutton(ctrl, text="Auto-resync (15 s)",
+                       variable=self._auto_resync_var,
+                       font=("Segoe UI", 8), bg=BG, fg=BLUE,
+                       selectcolor=CARD, activebackground=BG).pack(side="left")
+
+        # Kick status indicator on its own row so long text never overflows
+        kick_row = tk.Frame(sec, bg=BG)
+        kick_row.pack(fill="x", pady=(2, 0))
+        self._last_kick_lbl = tk.Label(kick_row, text="", font=("Segoe UI", 8),
+                                        bg=BG, fg=DIM, anchor="w")
+        self._last_kick_lbl.pack(side="left", fill="x", expand=True)
+
+        self.after(30, self._update_beat_viz)
+
+    def _make_band_sliders(self, parent, name, color,
+                            low_var, low_from, low_to,
+                            high_var, high_from, high_to, row):
+        """One row: [label]  Low [slider] [Hz]   High [slider] [Hz]
+        Sized to fit a ~450 px right column on 1920×1080."""
+        tk.Label(parent, text=f"{name}:", font=("Segoe UI", 9, "bold"),
+                 bg=BG, fg=color, width=6, anchor="w").grid(row=row, column=0,
+                                                              padx=(0, 2), pady=2)
+        tk.Label(parent, text="Lo", font=("Segoe UI", 8),
+                 bg=BG, fg=DIM).grid(row=row, column=1)
+        ttk.Scale(parent, from_=low_from, to=low_to, orient="horizontal",
+                  variable=low_var, length=80).grid(row=row, column=2, padx=2)
+        lo_lbl = tk.Label(parent, text="", font=("Segoe UI", 8, "bold"),
+                          bg=BG, fg=color, width=6, anchor="w")
+        lo_lbl.grid(row=row, column=3, padx=(2, 6))
+        low_var.trace_add("write",
+            lambda *_: lo_lbl.config(text=self._fmt_hz(low_var.get())))
+        lo_lbl.config(text=self._fmt_hz(low_var.get()))
+
+        tk.Label(parent, text="Hi", font=("Segoe UI", 8),
+                 bg=BG, fg=DIM).grid(row=row, column=4)
+        ttk.Scale(parent, from_=high_from, to=high_to, orient="horizontal",
+                  variable=high_var, length=80).grid(row=row, column=5, padx=2)
+        hi_lbl = tk.Label(parent, text="", font=("Segoe UI", 8, "bold"),
+                          bg=BG, fg=color, width=6, anchor="w")
+        hi_lbl.grid(row=row, column=6, padx=(2, 0))
+        high_var.trace_add("write",
+            lambda *_: hi_lbl.config(text=self._fmt_hz(high_var.get())))
+        hi_lbl.config(text=self._fmt_hz(high_var.get()))
+
+    @staticmethod
+    def _fmt_hz(v: float) -> str:
+        return f"{int(v)} Hz" if v < 1000 else f"{v/1000:.1f} kHz"
+
+    def _apply_band_settings(self, *_):
+        det = self._audio_det
+        if det is None:
+            return
+        kl, kh = self._kick_low_var.get(),   self._kick_high_var.get()
+        hl, hh = self._hihat_low_var.get(),  self._hihat_high_var.get()
+        # Enforce min separation so the bandpasses don't collapse
+        if kh <= kl + 10:
+            self._kick_high_var.set(kl + 10);  return
+        if hh <= hl + 100:
+            self._hihat_high_var.set(hl + 100); return
+        det.set_bands(kick_low=kl, kick_high=kh,
+                      hihat_low=hl, hihat_high=hh,
+                      kick_weight=self._kick_weight_var.get())
+
+    def _update_beat_viz(self):
+        """Redraws the beat counter, phase meter, waveform and spectrum at
+        ~60 fps.  Both the waveform and the spectrum are rendered as single
+        bitmap blits (no per-canvas-item churn), so the budget fits."""
+        try:
+            self._draw_beat_viz()
+        except Exception:
+            pass
+        self.after(16, self._update_beat_viz)
+
+    def _draw_beat_viz(self):
+        bpm_on = self._bpm_on.get()
+        beat   = (self._current_raw_beat() + self._beat_offset) if bpm_on else 0.0
+        frac   = beat % 1.0
+        beat_n = int(beat) % 4   # 0-3
+
+        # ── Kick status indicator ────────────────────────────────────────────
+        if self._last_kick_time > 0:
+            gap = time.perf_counter() - self._last_kick_time
+            if gap < 2.0:
+                self._last_kick_lbl.config(text=f"kick {gap:.1f}s", fg=GREEN)
+            elif gap < 15.0:
+                self._last_kick_lbl.config(text=f"kick {gap:.0f}s ago", fg=YELLOW)
+            else:
+                self._last_kick_lbl.config(text=f"WAITING DROP ({gap:.0f}s)", fg=RED)
+        else:
+            self._last_kick_lbl.config(text="no kick yet", fg=DIM)
+
+        # ── Beat counter labels ──────────────────────────────────────────────
+        detected = self._beats_since_resync
+        if self._resync_time > 0 and bpm_on:
+            bpm_now  = self._bpm_var.get()
+            clock_beats = int((time.perf_counter() - self._resync_time)
+                              * bpm_now / 60.0)
+            drift = detected - clock_beats
+            drift_col = RED if abs(drift) > 4 else (YELLOW if abs(drift) > 1 else GREEN)
+            self._beats_detected_lbl.config(text=f"detected: {detected}")
+            self._beats_clock_lbl.config(text=f"clock: {clock_beats}")
+            self._beats_drift_lbl.config(
+                text=f"drift: {drift:+d}", fg=drift_col)
+        else:
+            self._beats_detected_lbl.config(text="detected: —")
+            self._beats_clock_lbl.config(text="clock: —")
+            self._beats_drift_lbl.config(text="drift: —", fg=YELLOW)
+
+        # ── Beat boxes ───────────────────────────────────────────────────────
+        for i, (box, lbl) in enumerate(self._beat_boxes):
+            if bpm_on and i == beat_n:
+                box.config(bg=BLUE, highlightbackground=BLUE)
+                box.itemconfig(lbl, fill="#1e1e2e")
+            else:
+                box.config(bg=BTN, highlightbackground=DIM)
+                box.itemconfig(lbl, fill=FG)
+
+        # ── Phase bar ────────────────────────────────────────────────────────
+        pw = self._phase_canvas.winfo_width()
+        if pw > 1:
+            fill_x = int(pw * frac)
+            self._phase_canvas.coords(self._phase_bar, 0, 0, fill_x, 18)
+            self._phase_canvas.coords(self._phase_tick,
+                                      fill_x, 0, fill_x, 18)
+
+        # ── Waveform + Spectrum (bitmap-rendered) ────────────────────────────
+        det = self._audio_det
+        if det is None or not det.running:
+            return
+        self._draw_waveform(det)
+        self._draw_spectrum(det)
+
+    # ── Bitmap-rendered waveform ───────────────────────────────────────────
+    # Same architecture as the spectrum: render to a numpy uint8 buffer, push
+    # one PhotoImage to the canvas per frame. Replaces the polygon-based path
+    # that pegged at ~15-20 fps because of canvas-item overhead.
+    WAVE_BG_RGB    = np.array([13, 13, 23],   dtype=np.uint8)   # match spec
+    WAVE_BAR_RGB   = np.array([137, 180, 250], dtype=np.uint8)  # bright blue
+    WAVE_TICK_RGB  = np.array([42, 42, 74],   dtype=np.uint8)   # beat ticks
+    WAVE_MARKER_RGB= np.array([249, 226, 175], dtype=np.uint8)  # YELLOW
+
+    def _init_wave_bitmap(self, cw: int, ch: int):
+        if not _PIL_OK:
+            return False
+        self._wave_buf_arr = np.empty((ch, cw, 3), dtype=np.uint8)
+        self._wave_pil     = _PILImage.fromarray(self._wave_buf_arr, mode="RGB")
+        self._wave_photo   = _PILImageTk.PhotoImage(self._wave_pil)
+        c = self._wave_canvas
+        if self._wave_image_id is not None:
+            try: c.delete(self._wave_image_id)
+            except Exception: pass
+        self._wave_image_id = c.create_image(0, 0, anchor="nw",
+                                              image=self._wave_photo)
+        self._wave_y_grid = np.arange(ch, dtype=np.int32).reshape(-1, 1)
+        # Pre-bake the dark alternating beat bands (positions never move)
+        bg = np.empty((ch, cw, 3), dtype=np.uint8)
+        bg[:] = self.WAVE_BG_RGB
+        for b in range(17):
+            x0 = int(b / 16 * cw)
+            x1 = int((b + 1) / 16 * cw)
+            bg[:, x0:x1] = (15, 15, 31) if b % 2 == 0 else (18, 18, 31)
+        self._wave_static_bg = bg
+        return True
+
+    def _draw_waveform(self, det):
+        if not _PIL_OK:
+            return
+        wave_buf = det._wave_buf
+        if not wave_buf:
+            return
+        c  = self._wave_canvas
+        cw = c.winfo_width()
+        ch = c.winfo_height()
+        if cw < 4 or ch < 4:
+            return
+        if (self._wave_buf_arr is None
+                or self._wave_buf_arr.shape[0] != ch
+                or self._wave_buf_arr.shape[1] != cw):
+            if not self._init_wave_bitmap(cw, ch):
+                return
+
+        bpm = self._bpm_var.get()
+        if bpm < 20:
+            bpm = 120.0
+        beat_dur   = 60.0 / bpm
+        t_now      = time.perf_counter()
+        window     = 16.0 * beat_dur
+        t_start    = t_now - window
+        inv_window = 1.0 / window
+
+        # ── Vectorised bucketing ─────────────────────────────────────────
+        data = np.fromiter(
+            (v for pair in wave_buf for v in pair),
+            dtype=np.float64,
+            count=len(wave_buf) * 2,
+        ).reshape(-1, 2)
+        t_rel = (data[:, 0] - t_start).astype(np.float32)
+        mask  = (t_rel >= 0.0) & (t_rel < window)
+        if not mask.any():
+            return
+        xs = (t_rel[mask] * (inv_window * cw)).astype(np.int32)
+        np.clip(xs, 0, cw - 1, out=xs)
+        buckets = np.zeros(cw, dtype=np.float32)
+        np.maximum.at(buckets, xs, data[:, 1][mask].astype(np.float32))
+        peak = float(buckets.max()) or 1e-6
+        norm_amp = buckets * (1.0 / peak)         # 0..1 per column
+
+        # Beat tick markers — sourced from madmom's beat times (aubio is gone).
+        madmom_det = getattr(self, "_madmom_det", None)
+        # Atomic snapshot — avoids torn reads while the madmom worker clears
+        # and re-extends beat_times during inference.
+        beat_source = (madmom_det.snapshot_beat_times()
+                       if madmom_det is not None else [])
+        markers = np.zeros(cw, dtype=np.float32)
+        for bt in list(beat_source):
+            if bt >= t_start:
+                x = int((bt - t_start) * inv_window * cw)
+                if 0 <= x < cw:
+                    markers[x] = 1.0
+
+        # ── GPU path (moderngl) ──────────────────────────────────────────
+        if self._gl_waveform is not None:
+            try:
+                self._gl_waveform.resize(cw, ch)
+                pixels = self._gl_waveform.render(norm_amp, markers)
+                if pixels is not None:
+                    self._wave_pil.frombytes(pixels.tobytes())
+                    self._wave_photo.paste(self._wave_pil)
+                    return
+            except Exception as exc:
+                log.warning("GL waveform render failed, CPU fallback: %s", exc)
+                try: self._gl_waveform.release()
+                except Exception: pass
+                self._gl_waveform = None
+
+        # ── CPU fallback ────────────────────────────────────────────────
+        buf = self._wave_buf_arr
+        buf[:] = self._wave_static_bg
+        mid_y    = ch // 2
+        scale    = (ch * 0.46) / peak
+        bar_half = (buckets * scale).astype(np.int32)
+        bt_2d    = (mid_y - bar_half).reshape(1, -1)
+        bb_2d    = (mid_y + bar_half).reshape(1, -1)
+        in_bar   = (self._wave_y_grid >= bt_2d) & (self._wave_y_grid <= bb_2d)
+        buf[in_bar] = self.WAVE_BAR_RGB
+        for bt in list(beat_source):
+            if bt >= t_start:
+                x = int((bt - t_start) * inv_window * cw)
+                if 0 <= x < cw:
+                    buf[:, x] = self.WAVE_TICK_RGB
+        buf[:, cw - 1] = self.WAVE_MARKER_RGB
+        if cw >= 2:
+            buf[:, cw - 2] = self.WAVE_MARKER_RGB
+        self._wave_pil.frombytes(buf.tobytes())
+        self._wave_photo.paste(self._wave_pil)
+
+    # ── Bitmap-rendered spectrum analyzer ──────────────────────────────────
+    # Renders directly into a numpy uint8 buffer and pushes it to the canvas
+    # as a single PhotoImage every frame.  Avoids tkinter's per-canvas-item
+    # overhead (the killer that capped the previous polygon approach to ~15
+    # fps) — easily hits 60+ fps with a 1200×400 canvas.
+    #
+    # Tuning for percussive content:
+    # - Frequency-mapped column tints emphasise kick (red), snare (green),
+    #   hi-hat (blue) without temporal smoothing.
+    # - Peak-hold trace: 1-pixel line that follows the highest level seen per
+    #   column over the last ~500 ms, decaying slowly. Makes transients pop
+    #   without making the main bars feel sticky.
+    SPEC_FMIN_HZ   = 25.0
+    SPEC_FMAX_HZ   = 20000.0
+    SPEC_DB_MIN    = -90.0
+    SPEC_DB_MAX    = 0.0
+    SPEC_BG_RGB    = np.array([13, 13, 23],    dtype=np.uint8)  # #0d0d17
+    SPEC_KICK_TINT = np.array([42, 26, 8],     dtype=np.float32)
+    SPEC_HH_TINT   = np.array([10, 31, 42],    dtype=np.float32)
+    SPEC_PEAK_RGB  = np.array([240, 245, 255], dtype=np.uint8)  # peak-hold trace
+    SPEC_OUTLINE_RGB = np.array([210, 220, 245], dtype=np.uint8) # bar-top outline
+
+    def _init_spec_bitmap(self, cw: int, ch: int):
+        """(Re)allocate the spectrum bitmap and per-canvas caches."""
+        if not _PIL_OK:
+            return False
+        self._spec_buf  = np.empty((ch, cw, 3), dtype=np.uint8)
+        self._spec_pil  = _PILImage.fromarray(self._spec_buf, mode="RGB")
+        self._spec_photo = _PILImageTk.PhotoImage(self._spec_pil)
+        c = self._spec_canvas
+        if self._spec_image_id is not None:
+            try: c.delete(self._spec_image_id)
+            except Exception: pass
+        self._spec_image_id = c.create_image(0, 0, anchor="nw",
+                                              image=self._spec_photo)
+        # Column-by-column colour tint: red → orange → green → cyan → blue
+        # as frequency rises.  Smooth interpolation between keypoints in log-Hz.
+        log_min = math.log(self.SPEC_FMIN_HZ)
+        log_max = math.log(self.SPEC_FMAX_HZ)
+        log_f   = log_min + (np.arange(cw) + 0.5) / cw * (log_max - log_min)
+        keypoints = [
+            (math.log(30),    (220,  40,  60)),   # deep red — sub
+            (math.log(80),    (255,  90,  50)),   # red — kick fundamental
+            (math.log(250),   (255, 170,  80)),   # orange — snare body
+            (math.log(800),   (180, 240, 120)),   # yellow-green — vocals
+            (math.log(2500),  (100, 220, 200)),   # green-cyan — presence
+            (math.log(8000),  (80,  150, 255)),   # blue — hi-hat
+            (math.log(18000), (60,   80, 255)),   # deep blue — cymbals
+        ]
+        xp = np.array([k[0] for k in keypoints])
+        colors = np.zeros((cw, 3), dtype=np.float32)
+        for ci in range(3):
+            yp = np.array([k[1][ci] for k in keypoints], dtype=np.float32)
+            colors[:, ci] = np.interp(log_f, xp, yp)
+        self._spec_col_color = colors
+        self._spec_peak      = np.zeros(cw, dtype=np.float32)
+        self._spec_y_grid    = np.arange(ch, dtype=np.int32).reshape(-1, 1)
+        # Pre-render the static background (grid + freq/dB labels) once.
+        self._spec_static_bg = self._build_spec_static_bg(cw, ch)
+        return True
+
+    def _build_spec_static_bg(self, cw: int, ch: int):
+        """Return a uint8 (H, W, 3) buffer pre-filled with bg + grid + labels.
+        Rebuilt only when the canvas is resized."""
+        bg = np.empty((ch, cw, 3), dtype=np.uint8)
+        bg[:] = self.SPEC_BG_RGB
+
+        log_min = math.log(self.SPEC_FMIN_HZ)
+        log_max = math.log(self.SPEC_FMAX_HZ)
+        log_range = log_max - log_min
+        db_range  = self.SPEC_DB_MAX - self.SPEC_DB_MIN
+
+        # dB grid (horizontal lines)
+        for db in (-12, -24, -36, -48, -60, -72, -84):
+            y = int(ch - (db - self.SPEC_DB_MIN) / db_range * ch)
+            if 0 <= y < ch:
+                bg[y, :] = (21, 21, 31)
+        # Frequency grid (vertical lines)
+        for f in (50, 100, 200, 500, 1000, 2000, 5000, 10000, 20000):
+            if f < self.SPEC_FMIN_HZ or f > self.SPEC_FMAX_HZ:
+                continue
+            x = int(cw * (math.log(f) - log_min) / log_range)
+            if 0 <= x < cw:
+                bg[:, x] = (21, 21, 31)
+
+        # Text labels via PIL (only once, no per-frame cost)
+        try:
+            from PIL import ImageDraw, ImageFont  # type: ignore
+            pil_bg = _PILImage.fromarray(bg, mode="RGB")
+            draw   = ImageDraw.Draw(pil_bg)
+            try:
+                font_sm = ImageFont.truetype("segoeui.ttf", 9)
+            except OSError:
+                font_sm = ImageFont.load_default()
+            for db in (-12, -24, -36, -48, -60, -72, -84):
+                y = int(ch - (db - self.SPEC_DB_MIN) / db_range * ch)
+                draw.text((cw - 22, y - 6), f"{db}", fill=(58, 58, 74),
+                          font=font_sm)
+            for f in (50, 100, 200, 500, 1000, 2000, 5000, 10000, 20000):
+                if f < self.SPEC_FMIN_HZ or f > self.SPEC_FMAX_HZ:
+                    continue
+                x = int(cw * (math.log(f) - log_min) / log_range)
+                lbl = f"{f}" if f < 1000 else f"{f//1000}k"
+                draw.text((x + 2, ch - 14), lbl, fill=(85, 87, 112),
+                          font=font_sm)
+            bg = np.asarray(pil_bg, dtype=np.uint8).copy()
+        except Exception:
+            pass
+        return bg
+
+    def _draw_spectrum(self, det):
+        spec = det.get_spectrum()
+        if spec is None:
+            return
+        freqs, mags_db = spec
+
+        # Determine the active render surface (native GL holder or canvas)
+        if self._native_spec is not None:
+            host = self._spec_holder
+            cw = host.winfo_width()
+            ch = host.winfo_height()
+        else:
+            if not _PIL_OK:
+                return
+            c  = self._spec_canvas
+            if c is None:
+                return
+            cw = c.winfo_width()
+            ch = c.winfo_height()
+        if cw < 4 or ch < 4:
+            return
+        # Lazy init / resize for the CPU bitmap fallback only
+        if (self._native_spec is None
+                and (self._spec_buf is None
+                     or self._spec_buf.shape[0] != ch
+                     or self._spec_buf.shape[1] != cw)):
+            if not self._init_spec_bitmap(cw, ch):
+                return
+
+        log_min = math.log(self.SPEC_FMIN_HZ)
+        log_max = math.log(self.SPEC_FMAX_HZ)
+        log_range = log_max - log_min
+        db_range  = self.SPEC_DB_MAX - self.SPEC_DB_MIN
+
+        # ── FFT bin → pixel column max dB (vectorised) ────────────────────
+        mask = (freqs >= self.SPEC_FMIN_HZ) & (freqs <= self.SPEC_FMAX_HZ)
+        if not mask.any():
+            return
+        f_kept = freqs[mask]
+        m_kept = mags_db[mask].astype(np.float32)
+        xs_all = ((np.log(f_kept) - log_min) / log_range * cw).astype(np.int32)
+        np.clip(xs_all, 0, cw - 1, out=xs_all)
+        col_max = np.full(cw, self.SPEC_DB_MIN, dtype=np.float32)
+        np.maximum.at(col_max, xs_all, m_kept)
+
+        # ── 80 dB/s peak-decay (fast attack, smooth release) ──────────────
+        # Rising values are taken immediately; falling values decay by the
+        # time-correct amount based on real elapsed frame interval.
+        now = time.perf_counter()
+        if (self._spec_decay_db is None
+                or self._spec_decay_db.shape[0] != cw):
+            self._spec_decay_db = col_max.copy()
+            self._spec_last_t = now
+        else:
+            dt = max(0.001, min(0.2, now - self._spec_last_t)) \
+                 if self._spec_last_t else 1.0 / 60.0
+            self._spec_last_t = now
+            decay = 80.0 * dt   # dB lost since last frame
+            np.maximum(col_max, self._spec_decay_db - decay,
+                       out=self._spec_decay_db)
+        col_max = self._spec_decay_db
+
+        # Normalised height per column (0..1)
+        norm_h = np.clip((col_max - self.SPEC_DB_MIN) / db_range, 0.0, 1.0)
+
+        # Compute the kick / hi-hat band positions in normalised x coordinates
+        kl, kh = self._kick_low_var.get(),  self._kick_high_var.get()
+        hl, hh = self._hihat_low_var.get(), self._hihat_high_var.get()
+        kx0n = max(0.0, (math.log(max(kl, self.SPEC_FMIN_HZ)) - log_min) / log_range)
+        kx1n = min(1.0, (math.log(min(kh, self.SPEC_FMAX_HZ)) - log_min) / log_range)
+        hx0n = max(0.0, (math.log(max(hl, self.SPEC_FMIN_HZ)) - log_min) / log_range)
+        hx1n = min(1.0, (math.log(min(hh, self.SPEC_FMAX_HZ)) - log_min) / log_range)
+
+        # ── Native-GL path (preferred when available) ──────────────────────
+        # Publishes the curve to the embedded glfw child window and renders
+        # directly to its swap chain.  No PhotoImage upload — fastest path.
+        if self._native_spec is not None:
+            try:
+                self._native_spec.publish(norm_h, (kx0n, kx1n), (hx0n, hx1n))
+                self._native_spec.render()
+                return
+            except Exception as exc:
+                log.warning("Native GL spectrum failed (%s); reverting to offscreen path", exc)
+                try: self._native_spec.stop()
+                except Exception: pass
+                self._native_spec = None
+
+        # ── GPU path (moderngl offscreen FBO → CPU readback → PhotoImage) ──
+        if self._gl_spectrum is not None:
+            try:
+                self._gl_spectrum.resize(cw, ch)
+                pixels = self._gl_spectrum.render(
+                    norm_h, (kx0n, kx1n), (hx0n, hx1n))
+                if pixels is not None:
+                    self._spec_pil.frombytes(pixels.tobytes())
+                    self._spec_photo.paste(self._spec_pil)
+                    return
+            except Exception as exc:
+                log.warning("GL render failed, dropping to CPU path: %s", exc)
+                try:
+                    self._gl_spectrum.release()
+                except Exception:
+                    pass
+                self._gl_spectrum = None
+
+        # ── CPU fallback path (PIL bitmap) ─────────────────────────────────
+        bar_h    = (norm_h * (ch - 4)).astype(np.int32)
+        bar_top  = (ch - bar_h).reshape(1, -1)
+        in_bar   = self._spec_y_grid >= bar_top
+        denom = np.maximum(bar_h.reshape(1, -1), 1).astype(np.float32)
+        t = (self._spec_y_grid - bar_top).astype(np.float32) / denom
+        intensity = 0.45 + 0.55 * np.clip(1.0 - t, 0.0, 1.0)
+
+        buf = self._spec_buf
+        buf[:] = self._spec_static_bg
+        kx0 = int(kx0n * cw); kx1 = int(kx1n * cw)
+        hx0 = int(hx0n * cw); hx1 = int(hx1n * cw)
+        if kx1 > kx0:
+            buf[:, kx0:kx1] = np.clip(
+                buf[:, kx0:kx1].astype(np.float32) + self.SPEC_KICK_TINT,
+                0, 255).astype(np.uint8)
+        if hx1 > hx0:
+            buf[:, hx0:hx1] = np.clip(
+                buf[:, hx0:hx1].astype(np.float32) + self.SPEC_HH_TINT,
+                0, 255).astype(np.uint8)
+        col_color = self._spec_col_color.reshape(1, cw, 3)
+        bar_rgb = (col_color * intensity[..., None]).astype(np.uint8)
+        np.copyto(buf, bar_rgb, where=in_bar[..., None])
+        if kx1 > kx0:
+            buf[:, max(0, kx0):max(1, kx0 + 1)] = (255, 165, 0)
+            buf[:, min(cw - 1, kx1 - 1):min(cw, kx1)] = (255, 165, 0)
+        if hx1 > hx0:
+            buf[:, max(0, hx0):max(1, hx0 + 1)] = (0, 191, 255)
+            buf[:, min(cw - 1, hx1 - 1):min(cw, hx1)] = (0, 191, 255)
+        self._spec_pil.frombytes(buf.tobytes())
+        draw = _PILImageDraw.Draw(self._spec_pil)
+        bar_top_c = np.clip((ch - bar_h).astype(np.int32), 0, ch - 1)
+        line_pts = np.empty(cw * 2, dtype=np.int32)
+        line_pts[0::2] = np.arange(cw)
+        line_pts[1::2] = bar_top_c
+        draw.line(line_pts.tolist(), fill=(220, 230, 250), width=1)
+        self._spec_photo.paste(self._spec_pil)
+
+    def _start_madmom(self):
+        """Auto-starts when audio starts.  Madmom is the *only* BPM source."""
+        if getattr(self, "_madmom_det", None) is not None:
+            return
+        try:
+            from .bpm_madmom import is_available, MadmomBPM
+        except Exception as exc:
+            log.warning("madmom unavailable: %s", exc)
+            return
+        if not is_available():
+            self._audio_conf_lbl.config(text="madmom unavailable", fg=RED)
+            return
+        # Construct + start madmom on a worker thread so the audio thread isn't
+        # starved while the RNN model files load (~1 s the first time).
+        src_rate = getattr(self._audio_det, "_rate", 44100) or 44100
+        self._audio_bpm_lbl.config(text="---", fg=YELLOW)
+        self._audio_conf_lbl.config(
+            text=f"madmom loading… (src {src_rate} Hz)", fg=DIM)
+
+        def _bg_build():
+            try:
+                det = MadmomBPM(window_s=8.0, source_rate=int(src_rate))
+                det.start()
+            except Exception as exc:
+                log.error("Madmom start failed: %s", exc, exc_info=True)
+                self.after(0, lambda: self._audio_conf_lbl.config(
+                    text=f"madmom failed: {exc}", fg=RED))
+                return
+            def _attach():
+                self._madmom_det = det
+                if self._audio_det is not None:
+                    self._audio_det.attach_madmom(det)
+                self._audio_conf_lbl.config(
+                    text=f"madmom warming up… (src {src_rate} Hz)", fg=DIM)
+                self.after(250, self._poll_madmom)
+            self.after(0, _attach)
+
+        threading.Thread(target=_bg_build, daemon=True,
+                          name="madmom-init").start()
+
+    def _stop_madmom(self):
+        det = getattr(self, "_madmom_det", None)
+        if det is None:
+            return
+        if self._audio_det is not None:
+            self._audio_det.detach_madmom()
+        try: det.stop()
+        except Exception: pass
+        self._madmom_det = None
+
+    def _poll_madmom(self):
+        det = getattr(self, "_madmom_det", None)
+        if det is None or not det.running:
+            return
+        if det.bpm > 0:
+            # Single writer to the clock BPM.
+            self._bpm_var.set(round(det.bpm, 3))
+            col = GREEN if det.confidence > 0.5 else YELLOW
+            filled = int(round(det.confidence * 5))
+            dots = "●" * filled + "○" * (5 - filled)
+            self._audio_bpm_lbl.config(text=f"{det.bpm:.2f}", fg=col)
+            self._audio_conf_lbl.config(
+                text=f"madmom {dots} {det.confidence:.2f}", fg=col)
+
+            # ── Drive the beat-visualizer counter from madmom's beat list ──
+            # Atomic snapshot — avoids torn reads while the worker clears
+            # and re-extends beat_times during inference.
+            for t in det.snapshot_beat_times():
+                if t > self._madmom_beats_seen_t:
+                    self._beats_since_resync += 1
+                    self._madmom_beats_seen_t = t
+
+            # Phase lock: nudge _beat_offset so the most recent madmom beat
+            # falls on an integer effective-beat.  Gentle 15 % step per poll
+            # — converges in ~1.5 s without ever jumping audibly.
+            # Suppressed for 2 s after an auto-resync so the snap-to-beat-1
+            # we just did isn't immediately drifted away.
+            now = time.perf_counter()
+            if (det.last_beat_t > 0 and self._bpm_on.get()
+                    and now >= self._phase_lock_freeze_until):
+                if now - det.last_beat_t < 1.5:
+                    raw_now = self._current_raw_beat()
+                    elapsed = now - det.last_beat_t
+                    bpm_now = self._bpm_var.get() or 120.0
+                    beats_since   = elapsed * bpm_now / 60.0
+                    target_beat   = round(raw_now + self._beat_offset - beats_since) + beats_since
+                    target_offset = target_beat - raw_now
+                    self._beat_offset = 0.85 * self._beat_offset + 0.15 * target_offset
+        self.after(200, self._poll_madmom)
 
     def _toggle_audio(self):
         if self._audio_det is None:
             return
         if self._audio_det.running:
             self._audio_det.stop()
+            self._stop_madmom()
             self._audio_btn.config(text="Start Audio", bg=BTN, fg=BTNFG)
             self._audio_bpm_lbl.config(text="---", fg=YELLOW)
             self._audio_conf_lbl.config(text="")
@@ -1271,29 +2144,58 @@ class BlindsApp(tk.Tk):
                 self._audio_det.start(idx, loopback, self._on_audio_bpm, source=source)
                 self._audio_btn.config(text="Stop Audio", bg=RED, fg="#1e1e2e")
                 self._audio_conf_lbl.config(text="Listening…", fg=DIM)
+                # Madmom is the sole BPM source — starts with audio.
+                self._start_madmom()
             except Exception as exc:
                 log.error("Audio start failed: %s", exc, exc_info=True)
                 self._audio_conf_lbl.config(text=str(exc), fg=RED)
         self._refresh_apc_leds()
         self._refresh_apc_btn_colors()
 
-    def _on_audio_bpm(self, bpm: float, confidence: float, status: str = "tracking"):
+    def _on_audio_bpm(self, bpm: float, confidence: float,
+                       status: str = "tracking",
+                       is_beat: bool = False, is_kick: bool = False):
         # Called from the audio background thread — bounce to the main thread.
-        self.after(0, lambda b=bpm, c=confidence, s=status: self._apply_audio_bpm(b, c, s))
+        # is_beat is accepted for back-compat with the old callback shape but
+        # nothing in the new pipeline emits or reads it.
+        self.after(0, lambda b=bpm, c=confidence, s=status, ik=is_kick:
+                   self._apply_audio_bpm(b, c, s, ik))
 
-    def _apply_audio_bpm(self, bpm: float, confidence: float, status: str = "tracking"):
-        held = (status == "hold")
-        col  = BLUE if held else (GREEN if confidence > 0.6 else YELLOW)
-        self._audio_bpm_lbl.config(text=f"{bpm:.2f}", fg=col)
-        if _AUBIO_OK:
-            filled = int(round(confidence * 5))
-            dots   = "●" * filled + "○" * (5 - filled)
-            tag    = "HOLD (break)" if held else "lock"
-            self._audio_conf_lbl.config(text=f"{tag} {dots} {confidence:.2f}", fg=col)
-        else:
-            self._audio_conf_lbl.config(text="onset detected", fg=DIM)
-        # Drive the BPM clock at full precision (keep the decimals).
-        self._bpm_var.set(round(bpm, 3))
+    def _apply_audio_bpm(self, bpm: float, confidence: float,
+                          status: str = "tracking",
+                          is_kick: bool = False):
+        """Aubio no longer drives BPM — madmom owns it.  The only thing this
+        callback still handles is the kick-band rising-edge for auto-resync
+        after a silent breakdown."""
+        if is_kick and self._bpm_on.get():
+            now = time.perf_counter()
+            if self._auto_resync_var.get():
+                det = getattr(self, "_madmom_det", None)
+
+                # ── Path A: madmom is armed (just exited a sustained HOLD) ──
+                # This fires on the very first kick after a real breakdown,
+                # regardless of how long the silence was.  Snaps phase to the
+                # drop with zero latency.
+                if det is not None and getattr(det, "armed_for_resync", False):
+                    log.info("Auto-resync: madmom exited HOLD, first kick = drop")
+                    det.armed_for_resync = False
+                    self._resync()
+
+                # ── Path B: very long silence safety net (15 s+) ──
+                # In case HOLD never fired but the music genuinely stopped
+                # for ages — gap measured against madmom's last published
+                # beat so false-positive kicks don't reset the timer.
+                else:
+                    ref_t = (det.last_beat_t if det is not None
+                              and det.last_beat_t > 0
+                              else self._last_kick_time)
+                    gap = now - ref_t if ref_t > 0 else 0.0
+                    if gap > 15.0:
+                        log.info("Auto-resync: %.1f s without madmom beats", gap)
+                        self._resync()
+
+            self._last_kick_time = now
+
 
     def _poll_audio_level(self):
         if self._audio_det is not None and self._audio_det.running:
@@ -1313,9 +2215,25 @@ class BlindsApp(tk.Tk):
         self.after(80, self._poll_audio_level)
 
     def _on_close(self):
+        det = getattr(self, "_madmom_det", None)
+        if det is not None:
+            try: det.stop()
+            except Exception: pass
         if self._audio_det is not None:
             self._audio_det.stop()
         self._stop_midi()
+        if self._native_spec is not None:
+            try: self._native_spec.stop()
+            except Exception: pass
+            self._native_spec = None
+        if self._gl_spectrum is not None:
+            try: self._gl_spectrum.release()
+            except Exception: pass
+            self._gl_spectrum = None
+        if self._gl_waveform is not None:
+            try: self._gl_waveform.release()
+            except Exception: pass
+            self._gl_waveform = None
         self.destroy()
 
     # ── MIDI controller (APC40 MK2) ──────────────────────────────────────────
@@ -1401,6 +2319,42 @@ class BlindsApp(tk.Tk):
             self._stop_midi()
         else:
             self._start_midi()
+
+    # APC40 MK2 input ports are exposed with names like "APC40 mkII 0",
+    # "APC40 mkII 1", etc. on Windows.  This substring is what we match on.
+    _APC40_NAME_MATCH = "APC40"
+    # Number of additional polls after the initial attempt (every 2 s).
+    # Lets the user plug the controller in within ~12 s of launching.
+    _APC40_AUTODETECT_RETRIES = 6
+
+    def _auto_connect_apc40(self, retries_left: int | None = None):
+        """Scan available MIDI input ports for an Akai APC40 MK2 and connect.
+        Silent no-op when MIDI is unavailable or no matching device exists.
+        Retries every 2 s for ~12 s in case the controller is plugged in
+        just after launch."""
+        if retries_left is None:
+            retries_left = self._APC40_AUTODETECT_RETRIES
+        if (not MIDI_AVAILABLE or mido is None
+                or self._midi_port is not None):
+            return
+        try:
+            names = mido.get_input_names() or []
+        except Exception:
+            names = []
+        match = next(
+            (n for n in names if self._APC40_NAME_MATCH in n.upper()),
+            None)
+        if match is not None:
+            log.info("Auto-detect: connecting to %s", match)
+            # Refresh dropdown so the user sees what's now available
+            if hasattr(self, "_midi_combo"):
+                self._midi_combo.config(values=names)
+            self._midi_dev_var.set(match)
+            self._start_midi()
+            return
+        # Not found yet — try again later if we have retries left
+        if retries_left > 0:
+            self.after(2000, lambda: self._auto_connect_apc40(retries_left - 1))
 
     def _start_midi(self):
         if not MIDI_AVAILABLE or mido is None:
@@ -1539,9 +2493,9 @@ class BlindsApp(tk.Tk):
 
         # Beat rows: 8 assigned buttons — light purple when not chosen,
         # bright yellow when chosen (high-contrast counterpart of the purple).
-        def beat_velocity(sync_beats, col):
+        def beat_velocity(sync_beats, col, beat_vals):
             return (self.APC_LED_BEAT_ON_VEL
-                    if sync_beats == APC_BEAT_VALUES[col]
+                    if sync_beats == beat_vals[col]
                     else self.APC_LED_BEAT_OFF_VEL)
 
         # Size pattern row (row 0)
@@ -1551,7 +2505,7 @@ class BlindsApp(tk.Tk):
         # Size beat row (row 1)
         for col in range(8):
             self._led_set(_apc_clip_note(APC_ROW_SIZE_BEAT, col),
-                          beat_velocity(self._size_sync_beats, col))
+                          beat_velocity(self._size_sync_beats, col, APC_SIZE_BEAT_VALUES))
 
         # Position pattern row (row 3)
         for col in range(8):
@@ -1560,7 +2514,7 @@ class BlindsApp(tk.Tk):
         # Position beat row (row 4)
         for col in range(8):
             self._led_set(_apc_clip_note(APC_ROW_POS_BEAT, col),
-                          beat_velocity(self._pos_sync_beats, col))
+                          beat_velocity(self._pos_sync_beats, col, APC_POS_BEAT_VALUES))
 
         # Master-section toggle buttons (stateful)
         self._led_btn(APC_BTN_BPM_SYNC,   self._bpm_on.get())
@@ -1591,6 +2545,8 @@ class BlindsApp(tk.Tk):
         for btn_note in APC_NOTE_DEVICE_BTN_ALL:
             self._led_btn(btn_note, False)
         self._chase_last_btn = None
+        self._knob_prev_cc = [-1] * 8
+        self._knob_btn_on  = [False] * 8
         self._led_ring(APC_CC_GAP_SIZE, 0)
 
     def _chase_leds_tick(self):
@@ -1599,6 +2555,8 @@ class BlindsApp(tk.Tk):
         - Knob ring: single LED scans clockwise around 15-position ring (1 LED per 1/15th beat)
         - Button: on/off flash (on for first half of beat, off for second half)"""
         try:
+            # IMPORTANT: must NOT `return` here — the reschedule at the bottom
+            # of the function keeps the loop alive even before MIDI connects.
             if self._midi_out is not None:
                 beat          = self._current_raw_beat() + self._beat_offset
                 beat_in_cycle = int(beat) % 8              # 0-7 beat index
@@ -1613,7 +2571,8 @@ class BlindsApp(tk.Tk):
                         self._led_ring(APC_CC_DEVICE_KNOB_BASE + prev_offset, 0)
                         # Turn off previous button
                         prev_btn_note = APC_NOTE_DEVICE_BTN_ALL[self._chase_last_btn]
-                        self._midi_out.send(mido.Message("note_off", note=prev_btn_note, channel=0))
+                        self._midi_out.send(mido.Message(
+                            "note_off", note=prev_btn_note, channel=0))
                     self._chase_last_btn = beat_in_cycle
 
                 # Knob ring: position 0-14 → one LED clockwise around ring
@@ -1621,11 +2580,13 @@ class BlindsApp(tk.Tk):
                 self._led_ring(APC_CC_DEVICE_KNOB_BASE + knob_offset,
                                APC_SINGLE_RING_POS[led_pos])
 
-                # Button: on/off flash (on for first 0.5 of beat, off for second 0.5)
+                # Button: on/off flash (first half of beat → on, second half → off)
                 btn_note = APC_NOTE_DEVICE_BTN_ALL[beat_in_cycle]
-                btn_on = beat_frac < 0.5  # on in first half, off in second half
+                btn_on = beat_frac < 0.5
                 msg_type = "note_on" if btn_on else "note_off"
-                self._midi_out.send(mido.Message(msg_type, note=btn_note, velocity=127 if btn_on else 0, channel=0))
+                self._midi_out.send(mido.Message(
+                    msg_type, note=btn_note,
+                    velocity=127 if btn_on else 0, channel=0))
         except Exception:
             pass
         self.after(15, self._chase_leds_tick)   # ≈ 67 Hz
@@ -1662,7 +2623,7 @@ class BlindsApp(tk.Tk):
                         pat = PATTERNS[col - 1]
                         self.after(0, lambda p=pat: self._set_size_pattern(p[1], p[0]))
                 elif row == APC_ROW_SIZE_BEAT:
-                    b = APC_BEAT_VALUES[col]
+                    b = APC_SIZE_BEAT_VALUES[col]
                     self.after(0, lambda v=b: self._set_size_sync(v))
                 elif row == APC_ROW_POS_PAT:
                     if col == 0:
@@ -1671,7 +2632,7 @@ class BlindsApp(tk.Tk):
                         pat = PATTERNS[col - 1]
                         self.after(0, lambda p=pat: self._set_pos_pattern(p[1], p[0]))
                 elif row == APC_ROW_POS_BEAT:
-                    b = APC_BEAT_VALUES[col]
+                    b = APC_POS_BEAT_VALUES[col]
                     self.after(0, lambda v=b: self._set_pos_sync(v))
                 return
 
